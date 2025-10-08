@@ -1574,11 +1574,20 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		if not cmd_line:
 			QtWidgets.QMessageBox.warning(self, "No Command", "Generated command is empty.")
 		else:
-			self.comm_console.send_commands([
-				"cd /",
-				"cd stress_tools",
-				cmd_line,
-			], spacing_ms=400)
+			# For Yocto/Ubuntu, do not tail in the console; keep it clean and interactive
+			os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+			if os_sel in ("Yocto", "Ubuntu"):
+				self.comm_console.send_commands([
+					"cd /",
+					"cd stress_tools",
+					cmd_line,
+				], spacing_ms=400)
+			else:
+				self.comm_console.send_commands([
+					"cd /",
+					"cd stress_tools",
+					cmd_line,
+				], spacing_ms=400)
 		self._sample_timer.stop()
 		tail_path = self.log_file_edit.text().strip()
 		if not tail_path:
@@ -1988,7 +1997,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			item_idx += 1
 
 	def _open_log_dialog(self) -> None:
-		# Create a modal dialog to display the live log content
+		# Create a modal dialog to display the log content (snapshot for Yocto/Ubuntu; live for AAOS)
 		d = QtWidgets.QDialog(self)
 		d.setWindowTitle("Live Log Viewer")
 		d.resize(900, 600)
@@ -2010,12 +2019,46 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		mono = QtGui.QFont("Consolas", 10)
 		text.setFont(mono)
 		v.addWidget(text, 1)
+		# Decide path based on target OS
+		os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+		if os_sel in ("Yocto", "Ubuntu") and hasattr(self, 'comm_console'):
+			# Snapshot over UART without polluting console: use capture mode
+			text.setPlainText("Fetching latest status from device…")
+			# Ensure connected; if not, try best-effort connect
+			connected = bool(self.comm_console.uart_connect_btn.isChecked())
+			if not connected:
+				try:
+					linux_port = self.comm_console.find_linux_port("VID:PID=067B:23A3")
+					if linux_port:
+						connected = self.comm_console.connect_to_port(linux_port, baud=921600)
+				except Exception:
+					connected = False
+			if not connected:
+				text.setPlainText("Failed to connect to Linux UART.")
+			else:
+				# Unique end token
+				end_token = f"__END_OF_STATUS__{int(time.time()*1000)}__"
+				def _done(payload: str) -> None:
+					try:
+						text.setPlainText(payload)
+						text.moveCursor(QtGui.QTextCursor.End)
+					except Exception:
+						pass
+				try:
+					self.comm_console.start_capture(end_token=end_token, timeout_ms=5000, on_complete=_done)
+					# Use absolute path; send silently so commands themselves don't echo
+					self.comm_console.send_commands_silent([
+						f"cat /stress_tools/stress_tool_status.txt; echo {end_token}",
+					], spacing_ms=200)
+				except Exception:
+					text.setPlainText("Failed to fetch status log over UART.")
+			# No live timer for UART snapshot; close dialog to fetch again later
+			d.exec()
+			return
+		# Non-Yocto/Ubuntu path (AAOS): existing behavior
 		# Clear buffer before showing to guarantee "fresh" view
 		self._raw_log_buffer = ""
-		# Load initial snapshot:
-		# 1) Try remote AAOS file via adb cat (fast, current content)
-		# 2) Fallback to in-memory buffer
-		# 3) Fallback to current local tail file if any
+		# Load initial snapshot via ADB, then fallbacks
 		_initial_set = False
 		try:
 			import subprocess
@@ -2041,7 +2084,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 						_initial_set = True
 			except Exception:
 				pass
-		# Live updates: reflect _raw_log_buffer into the dialog periodically
+		# Live updates: reflect _raw_log_buffer into the dialog periodically (AAOS)
 		append_timer = QtCore.QTimer(d)
 		append_timer.setInterval(300)
 		_prev_len = {'n': len(getattr(self, '_raw_log_buffer', ''))}
