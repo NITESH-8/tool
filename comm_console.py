@@ -1148,7 +1148,7 @@ class TerminalWidget(QtWidgets.QWidget):
 						self.input.insertPlainText("\n")
 					else:
 						self._on_send()
-						return True
+						return True 
 		except KeyboardInterrupt:
 			# Ignore Ctrl+C interrupts when running from a console to avoid PySide error dialog
 			return False
