@@ -678,7 +678,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			# For Yocto/Ubuntu, ensure the log file path points to the Linux status file
 			try:
 				if hasattr(self, 'log_file_edit'):
-					self.log_file_edit.setText("/stress_tools/status_tool_status.txt")
+					self.log_file_edit.setText("/stress_tools/stress_tool_status.txt")
 			except Exception:
 				pass
 			# Refresh core count dynamically by querying Linux via hidden UART
@@ -1590,35 +1590,32 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		if not cmd_line:
 			QtWidgets.QMessageBox.warning(self, "No Command", "Generated command is empty.")
 		else:
+			# Run the stress tool in background, then stream the status file over UART
 			self.comm_console.send_commands([
 				"cd /",
 				"cd stress_tools",
 				cmd_line,
+				"tail -n 0 -F /stress_tools/stress_tool_status.txt",
 			], spacing_ms=400)
 		self._sample_timer.stop()
-		# Determine log path for Yocto/Ubuntu flows; default to status file if empty
-		tail_path = self.log_file_edit.text().strip()
-		try:
-			os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
-		except Exception:
-			os_sel = ""
-		if not tail_path and os_sel in ("Yocto", "Ubuntu"):
-			try:
-				if hasattr(self, 'log_file_edit'):
-					self.log_file_edit.setText("/stress_tools/status_tool_status.txt")
-				tail_path = "/stress_tools/status_tool_status.txt"
-			except Exception:
-				pass
-		if not tail_path:
-			QtWidgets.QMessageBox.warning(self, "No Log File", "Please specify the log file path.")
-			return
-		self._start_tail_file(tail_path)
+		# Do not start local file tail for Linux; we stream via UART
 		self._start_schedule_timer()
 		self.btn_start.setEnabled(False)
 		self.btn_stop.setEnabled(True)
 		# Auto-open Show Log to display the status file
 		try:
 			QtCore.QTimer.singleShot(200, self._open_log_dialog)
+		except Exception:
+			pass
+		# Bridge UART console data into the Show Log buffer while running
+		try:
+			if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'data_received'):
+				# Disconnect previous to avoid duplicates
+				try:
+					self.comm_console.data_received.disconnect()
+				except Exception:
+					pass
+				self.comm_console.data_received.connect(lambda txt: setattr(self, '_raw_log_buffer', getattr(self, '_raw_log_buffer', '') + txt))
 		except Exception:
 			pass
 		try:
