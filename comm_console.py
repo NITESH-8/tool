@@ -574,6 +574,89 @@ class CommConsole(QtWidgets.QWidget):
 			pass
 		return super().eventFilter(source, event)
 
+	def send_line_silent(self, line: str) -> None:
+		"""Send a single line over UART without echoing to the UI/log buffers."""
+		try:
+			if self._serial is not None:
+				self._serial.write((line + "\n").encode())
+		except Exception:
+			pass
+
+	def send_commands_silent(self, commands: List[str], spacing_ms: int = 300, on_complete: Optional[Callable[[], None]] = None) -> None:
+		"""Send commands over UART without echoing them into the console UI."""
+		if not commands:
+			if on_complete:
+				on_complete()
+			return
+		queue = list(commands)
+		timer = QtCore.QTimer(self)
+		timer.setInterval(max(50, int(spacing_ms)))
+		def _flush_next():
+			if not queue:
+				timer.stop()
+				if on_complete:
+					on_complete()
+				return
+			cmd = queue.pop(0)
+			self.send_line_silent(cmd)
+		timer.timeout.connect(_flush_next)
+		timer.start()
+		_flush_next()
+
+	def start_capture(self, end_token: str, timeout_ms: int, on_complete: Callable[[str], None]) -> None:
+		"""Begin a UART capture session until end_token is seen or timeout occurs.
+
+		Data received while capture is active is not echoed to the UI; it is
+		collected into an internal buffer. When the end token arrives (token is
+		included in the incoming stream), the callback is invoked with the text
+		up to but not including the token.
+		"""
+		try:
+			# Stop any existing capture and disconnect timeout signal
+			self._capture_timeout.stop()
+			self._capture_timeout.timeout.disconnect()
+			
+			self._capture_active = True
+			self._capture_buffer = ""
+			self._capture_end_token = end_token
+			self._capture_callback = on_complete
+			
+			if timeout_ms > 0:
+				self._capture_timeout.timeout.connect(self._on_capture_timeout)
+				self._capture_timeout.start(int(timeout_ms))
+		except Exception as e:
+			# Fail closed (no capture)
+			print(f"Capture start failed: {e}")
+			self._capture_active = False
+			self._capture_buffer = ""
+			self._capture_end_token = None
+			self._capture_callback = None
+
+	def _on_capture_timeout(self) -> None:
+		"""Timeout handler: finish capture with whatever we have."""
+		try:
+			cb = self._capture_callback
+			text = self._capture_buffer
+		finally:
+			self._capture_active = False
+			self._capture_buffer = ""
+			self._capture_end_token = None
+			self._capture_callback = None
+			self._capture_timeout.stop()
+		try:
+			if cb:
+				cb(text)
+		except Exception:
+			pass
+
+	def stop_capture(self) -> None:
+		"""Stop capture immediately without invoking the callback."""
+		self._capture_active = False
+		self._capture_buffer = ""
+		self._capture_end_token = None
+		self._capture_callback = None
+		self._capture_timeout.stop()
+
 
 class TerminalWidget(QtWidgets.QWidget):
 	"""Simple embedded CMD-like terminal using QProcess.
@@ -939,93 +1022,6 @@ class TerminalWidget(QtWidgets.QWidget):
 		# Send first immediately
 		_flush_next()
 
-	def send_line_silent(self, line: str) -> None:
-		"""Send a single line over UART without echoing to the UI/log buffers."""
-		try:
-			if self._serial is not None:
-				self._serial.write((line + "\n").encode())
-		except Exception:
-			pass
-
-	def send_commands_silent(self, commands: List[str], spacing_ms: int = 300, on_complete: Optional[Callable[[], None]] = None) -> None:
-		"""Send commands over UART without echoing them into the console UI."""
-		if not commands:
-			if on_complete:
-				on_complete()
-			return
-		queue = list(commands)
-		timer = QtCore.QTimer(self)
-		timer.setInterval(max(50, int(spacing_ms)))
-		def _flush_next():
-			if not queue:
-				timer.stop()
-				if on_complete:
-					on_complete()
-				return
-			cmd = queue.pop(0)
-			self.send_line_silent(cmd)
-		timer.timeout.connect(_flush_next)
-		timer.start()
-		_flush_next()
-
-	def start_capture(self, end_token: str, timeout_ms: int, on_complete: Callable[[str], None]) -> None:
-		"""Begin a UART capture session until end_token is seen or timeout occurs.
-
-		Data received while capture is active is not echoed to the UI; it is
-		collected into an internal buffer. When the end token arrives (token is
-		included in the incoming stream), the callback is invoked with the text
-		up to but not including the token.
-		"""
-		try:
-			# Stop any existing capture and disconnect timeout signal
-			self._capture_timeout.stop()
-			self._capture_timeout.timeout.disconnect()
-			
-			self._capture_active = True
-			self._capture_buffer = ""
-			self._capture_end_token = end_token
-			self._capture_callback = on_complete
-			
-			if timeout_ms > 0:
-				self._capture_timeout.timeout.connect(self._on_capture_timeout)
-				self._capture_timeout.start(int(timeout_ms))
-		except Exception as e:
-			# Fail closed (no capture)
-			print(f"Capture start failed: {e}")
-			self._capture_active = False
-			self._capture_buffer = ""
-			self._capture_end_token = None
-			self._capture_callback = None
-
-	def _on_capture_timeout(self) -> None:
-		"""Timeout handler: finish capture with whatever we have."""
-		try:
-			cb = self._capture_callback
-			text = self._capture_buffer
-		finally:
-			self._capture_active = False
-			self._capture_buffer = ""
-			self._capture_end_token = None
-			self._capture_callback = None
-			self._capture_timeout.stop()
-		try:
-			if cb:
-				cb(text)
-		except Exception:
-			pass
-
-	def stop_capture(self) -> None:
-		"""Stop capture immediately without invoking the callback."""
-		self._capture_active = False
-		self._capture_buffer = ""
-		self._capture_end_token = None
-		self._capture_callback = None
-		self._capture_timeout.stop()
-
-	def disconnect_serial(self) -> None:
-		"""Disconnect if currently connected."""
-		self._uart_disconnect_if_needed()
-
 	def _uart_disconnect_if_needed(self) -> None:
 		if self.uart_connect_btn.isChecked():
 			self.uart_connect_btn.setChecked(False)
@@ -1148,7 +1144,7 @@ class TerminalWidget(QtWidgets.QWidget):
 						self.input.insertPlainText("\n")
 					else:
 						self._on_send()
-						return True 
+						return True
 		except KeyboardInterrupt:
 			# Ignore Ctrl+C interrupts when running from a console to avoid PySide error dialog
 			return False
