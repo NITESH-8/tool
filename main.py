@@ -1595,6 +1595,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				"cd /",
 				"cd stress_tools",
 				cmd_line,
+				# Show any existing content first (if file already exists), then follow new lines
+				"if [ -e /stress_tools/stress_tool_status.txt ]; then cat /stress_tools/stress_tool_status.txt; fi",
 				"tail -n 0 -F /stress_tools/stress_tool_status.txt",
 			], spacing_ms=400)
 		self._sample_timer.stop()
@@ -2040,8 +2042,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		mono = QtGui.QFont("Consolas", 10)
 		text.setFont(mono)
 		v.addWidget(text, 1)
-		# Clear buffer before showing to guarantee "fresh" view
-		self._raw_log_buffer = ""
+		# Do not clear buffer here so any prior UART/ADB content remains visible
 		# Load initial snapshot:
 		# For AAOS: prefer remote adb cat; for Yocto/Ubuntu: prefer local file
 		_initial_set = False
@@ -2104,6 +2105,27 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				pass
 		append_timer.timeout.connect(_pump)
 		append_timer.start()
+		# For Linux UART flows, also mirror UART chunks directly into the dialog
+		try:
+			if os_sel != "AAOS" and hasattr(self, 'comm_console') and hasattr(self.comm_console, 'data_received'):
+				# Define a slot that both appends to buffer and updates the dialog immediately
+				def _push_uart(txt: str) -> None:
+					try:
+						self._raw_log_buffer = getattr(self, '_raw_log_buffer', '') + (txt or '')
+						if txt:
+							text.moveCursor(QtGui.QTextCursor.End)
+							text.insertPlainText(txt)
+							text.moveCursor(QtGui.QTextCursor.End)
+					except Exception:
+						pass
+				self.comm_console.data_received.connect(_push_uart)
+				# Disconnect when dialog closes to avoid duplicate connections
+				try:
+					d.finished.connect(lambda _c, _s=None: self.comm_console.data_received.disconnect(_push_uart))
+				except Exception:
+					pass
+		except Exception:
+			pass
 		d.exec()
 
 	def _parse_stress_output(self, output: str) -> None:
