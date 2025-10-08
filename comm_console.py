@@ -23,13 +23,8 @@ class CommConsole(QtWidgets.QWidget):
 	`self.proto_stack` while keeping the same log/input area.
 	"""
 
-	# Emitted whenever UART data is received and decoded to text
-	data_received = QtCore.Signal(str)
-
 	def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
 		super().__init__(parent)
-		# When True, incoming UART text is not mirrored into the console UI
-		self.suppress_ui = False
 		self._build_ui()
 		self._setup_uart()
 		# ADB-only prompt is printed when ADB protocol is selected
@@ -505,15 +500,10 @@ class CommConsole(QtWidgets.QWidget):
 						text = str(data)
 					port = self.uart_port_combo.currentText()
 					self._port_logs[port] = self._port_logs.get(port, "") + text
-					if hasattr(self, 'log') and not getattr(self, 'suppress_ui', False):
+					if hasattr(self, 'log'):
 						self.log.moveCursor(QtGui.QTextCursor.End)
 						self.log.insertPlainText(text)
 						self.log.moveCursor(QtGui.QTextCursor.End)
-					# Emit for external listeners (e.g., Show Log buffer)
-					try:
-						self.data_received.emit(text)
-					except Exception:
-						pass
 		except Exception as e:
 			self._poll.stop()
 			try:
@@ -661,10 +651,9 @@ class TerminalWidget(QtWidgets.QWidget):
 					text = data.decode(errors='replace')
 				except Exception:
 					text = str(data)
-					if not getattr(self, 'suppress_ui', False):
-						self.view.moveCursor(QtGui.QTextCursor.End)
-						self.view.insertPlainText(text)
-						self.view.moveCursor(QtGui.QTextCursor.End)
+				self.view.moveCursor(QtGui.QTextCursor.End)
+				self.view.insertPlainText(text)
+				self.view.moveCursor(QtGui.QTextCursor.End)
 		except Exception:
 			pass
 
@@ -678,10 +667,9 @@ class TerminalWidget(QtWidgets.QWidget):
 					text = data.decode(errors='replace')
 				except Exception:
 					text = str(data)
-				if not getattr(self, 'suppress_ui', False):
-					self.view.moveCursor(QtGui.QTextCursor.End)
-					self.view.insertPlainText(text)
-					self.view.moveCursor(QtGui.QTextCursor.End)
+				self.view.moveCursor(QtGui.QTextCursor.End)
+				self.view.insertPlainText(text)
+				self.view.moveCursor(QtGui.QTextCursor.End)
 		except Exception:
 			pass
 
