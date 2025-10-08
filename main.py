@@ -2031,7 +2031,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 					linux_port = self.comm_console.find_linux_port("VID:PID=067B:23A3")
 					if linux_port:
 						connected = self.comm_console.connect_to_port(linux_port, baud=921600)
-				except Exception:
+				except Exception as e:
+					print(f"UART connect failed: {e}")
 					connected = False
 			if not connected:
 				text.setPlainText("Failed to connect to Linux UART.")
@@ -2040,18 +2041,23 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				end_token = f"__END_OF_STATUS__{int(time.time()*1000)}__"
 				def _done(payload: str) -> None:
 					try:
+						print(f"Capture completed, got {len(payload)} chars")
 						text.setPlainText(payload)
 						text.moveCursor(QtGui.QTextCursor.End)
-					except Exception:
-						pass
+					except Exception as e:
+						print(f"Capture callback failed: {e}")
+						text.setPlainText(f"Error displaying captured data: {e}")
 				try:
+					print(f"Starting capture with token: {end_token}")
 					self.comm_console.start_capture(end_token=end_token, timeout_ms=5000, on_complete=_done)
 					# Use absolute path; send silently so commands themselves don't echo
 					self.comm_console.send_commands_silent([
 						f"cat /stress_tools/stress_tool_status.txt; echo {end_token}",
 					], spacing_ms=200)
-				except Exception:
-					text.setPlainText("Failed to fetch status log over UART.")
+					print("Commands sent silently")
+				except Exception as e:
+					print(f"UART capture failed: {e}")
+					text.setPlainText(f"Failed to fetch status log over UART: {e}")
 			# No live timer for UART snapshot; close dialog to fetch again later
 			d.exec()
 			return
