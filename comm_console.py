@@ -1150,4 +1150,3 @@ class TerminalWidget(QtWidgets.QWidget):
 		except Exception:
 			pass
 		return super().eventFilter(source, event)
-
