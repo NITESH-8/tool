@@ -977,16 +977,21 @@ class TerminalWidget(QtWidgets.QWidget):
 		up to but not including the token.
 		"""
 		try:
+			# Stop any existing capture and disconnect timeout signal
+			self._capture_timeout.stop()
+			self._capture_timeout.timeout.disconnect()
+			
 			self._capture_active = True
 			self._capture_buffer = ""
 			self._capture_end_token = end_token
 			self._capture_callback = on_complete
-			self._capture_timeout.stop()
+			
 			if timeout_ms > 0:
 				self._capture_timeout.timeout.connect(self._on_capture_timeout)
 				self._capture_timeout.start(int(timeout_ms))
-		except Exception:
+		except Exception as e:
 			# Fail closed (no capture)
+			print(f"Capture start failed: {e}")
 			self._capture_active = False
 			self._capture_buffer = ""
 			self._capture_end_token = None
