@@ -229,16 +229,40 @@ class PerformanceApp(QtWidgets.QMainWindow):
 
 		# Subsystems group
 		sys_group = QtWidgets.QGroupBox("Subsystems")
-		sys_layout = QtWidgets.QVBoxLayout(sys_group)
+		sys_layout = QtWidgets.QGridLayout(sys_group)
 		sys_layout.setContentsMargins(10, 8, 10, 10)
-		sys_layout.setSpacing(6)
+		sys_layout.setSpacing(8)
+		sys_layout.setColumnMinimumWidth(0, 80)  # Subsystem names column
+		sys_layout.setColumnMinimumWidth(1, 60)  # Adaptive checkboxes column
+		
+		# Header row
+		adaptive_header = QtWidgets.QLabel("Adaptive")
+		adaptive_header.setAlignment(QtCore.Qt.AlignCenter)
+		adaptive_header.setStyleSheet("font-weight: bold; color: #A0AEC0; font-size: 11px;")
+		sys_layout.addWidget(adaptive_header, 0, 1)  # Row 0, Column 1
+		
+		# Subsystem checkboxes with adaptive checkboxes
 		self.checkbox_group: Dict[str, QtWidgets.QCheckBox] = {}
-		for name in SUBSYSTEMS:
+		self.adaptive_checkbox_group: Dict[str, QtWidgets.QCheckBox] = {}
+		for i, name in enumerate(SUBSYSTEMS, 1):  # Start from row 1
+			# Subsystem checkbox
 			cb = QtWidgets.QCheckBox(name)
 			cb.setToolTip(f"Toggle {name} tracking and target controls")
 			cb.stateChanged.connect(self._on_subsystem_toggled)
-			sys_layout.addWidget(cb)
+			sys_layout.addWidget(cb, i, 0)  # Row i, Column 0
 			self.checkbox_group[name] = cb
+			
+			# Adaptive checkbox - centered under the header
+			adaptive_cb = QtWidgets.QCheckBox()
+			adaptive_cb.setToolTip(f"Enable adaptive mode for {name}")
+			adaptive_cb.stateChanged.connect(self._on_adaptive_toggled)
+			adaptive_cb.setStyleSheet("QCheckBox { margin-left: 20px; }")  # Center the checkbox
+			sys_layout.addWidget(adaptive_cb, i, 1)  # Row i, Column 1
+			self.adaptive_checkbox_group[name] = adaptive_cb
+		
+		# Add stretch to the right to push content left
+		sys_layout.setColumnStretch(2, 1)
+		
 		controls.addWidget(sys_group)
 
 		# CPU Cores section (initially hidden)
@@ -1289,6 +1313,13 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self._refresh_plot_items()
 		self._update_command_preview()
 
+	def _on_adaptive_toggled(self) -> None:
+		"""Handle adaptive checkbox toggles for subsystems."""
+		# Get the current adaptive subsystems (for future functionality)
+		adaptive_subsystems = [name for name, cb in self.adaptive_checkbox_group.items() if cb.isChecked()]
+		# Update command preview to reflect adaptive changes
+		self._update_command_preview()
+
 	def _on_cpu_target_toggled(self) -> None:
 		"""Handle CPU Target checkbox toggle."""
 		cpu_target_selected = self.cpu_target_checkbox.isChecked()
@@ -2261,6 +2292,14 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Duration
 		dur = int(self.duration_spin.value())
 		parts.extend(["--duration", str(dur)])
+		
+		# Add adaptive parameter if any adaptive checkboxes are selected
+		if hasattr(self, 'adaptive_checkbox_group'):
+			adaptive_subsystems = [name.lower() for name, cb in self.adaptive_checkbox_group.items() if cb.isChecked()]
+			if adaptive_subsystems:
+				adaptive_param = ",".join(adaptive_subsystems)
+				parts.extend(["--adaptive", adaptive_param])
+		
 		# For all OS targets, add quiet and background
 		cmd = " ".join(parts) + " --quiet &"
 		self.command_preview.setPlainText(cmd)
