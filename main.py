@@ -675,6 +675,12 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			if os_sel not in ("Yocto", "Ubuntu"):
 				self._show_info_dialog("Not Supported", "Load Binary is supported for Yocto, Ubuntu, or AAOS.")
 				return
+			# For Yocto/Ubuntu, ensure the log file path points to the Linux status file
+			try:
+				if hasattr(self, 'log_file_edit'):
+					self.log_file_edit.setText("/stress_tools/status_tool_status.txt")
+			except Exception:
+				pass
 			# Refresh core count dynamically by querying Linux via hidden UART
 			self._update_core_count_from_linux()
 			# Rebuild core UI and active-graph list
@@ -1571,9 +1577,14 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			QtWidgets.QMessageBox.critical(self, "UART Connect Failed", f"Failed to open {linux_port} at 921600.")
 			self._on_stop()
 			return
+		# Ensure the console is visible and set to UART protocol explicitly
 		try:
 			self.btn_uart_toggle.setChecked(True)
 			self.main_stack.setCurrentIndex(1)
+			if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'proto_combo'):
+				self.comm_console.proto_combo.setCurrentIndex(0)  # UART
+				# Trigger protocol UI refresh immediately
+				self.comm_console._on_proto_changed()
 		except Exception:
 			pass
 		if not cmd_line:
@@ -1585,7 +1596,19 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				cmd_line,
 			], spacing_ms=400)
 		self._sample_timer.stop()
+		# Determine log path for Yocto/Ubuntu flows; default to status file if empty
 		tail_path = self.log_file_edit.text().strip()
+		try:
+			os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+		except Exception:
+			os_sel = ""
+		if not tail_path and os_sel in ("Yocto", "Ubuntu"):
+			try:
+				if hasattr(self, 'log_file_edit'):
+					self.log_file_edit.setText("/stress_tools/status_tool_status.txt")
+				tail_path = "/stress_tools/status_tool_status.txt"
+			except Exception:
+				pass
 		if not tail_path:
 			QtWidgets.QMessageBox.warning(self, "No Log File", "Please specify the log file path.")
 			return
@@ -1593,6 +1616,11 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self._start_schedule_timer()
 		self.btn_start.setEnabled(False)
 		self.btn_stop.setEnabled(True)
+		# Auto-open Show Log to display the status file
+		try:
+			QtCore.QTimer.singleShot(200, self._open_log_dialog)
+		except Exception:
+			pass
 		try:
 			if hasattr(self, 'action_execute'):
 				self.action_execute.setEnabled(False)
@@ -2018,20 +2046,33 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Clear buffer before showing to guarantee "fresh" view
 		self._raw_log_buffer = ""
 		# Load initial snapshot:
-		# 1) Try remote AAOS file via adb cat (fast, current content)
-		# 2) Fallback to in-memory buffer
-		# 3) Fallback to current local tail file if any
+		# For AAOS: prefer remote adb cat; for Yocto/Ubuntu: prefer local file
 		_initial_set = False
 		try:
-			import subprocess
-			res = subprocess.run([
-				"adb", "shell", "cat", "/tmp/android_stress_tool/stress_tool_status.txt"
-			], capture_output=True, text=True, timeout=3)
-			if res.returncode == 0 and (res.stdout or res.stderr):
-				text.setPlainText(res.stdout or res.stderr)
-				_initial_set = True
+			os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
 		except Exception:
-			pass
+			os_sel = ""
+		if os_sel == "AAOS":
+			try:
+				import subprocess
+				res = subprocess.run([
+					"adb", "shell", "cat", "/tmp/android_stress_tool/stress_tool_status.txt"
+				], capture_output=True, text=True, timeout=3)
+				if res.returncode == 0 and (res.stdout or res.stderr):
+					text.setPlainText(res.stdout or res.stderr)
+					_initial_set = True
+			except Exception:
+				pass
+		else:
+			# Yocto/Ubuntu: read from local file if available
+			try:
+				p = getattr(self, '_file_tail_path', None) or (self.log_file_edit.text() if hasattr(self, 'log_file_edit') else "")
+				if p and os.path.exists(p):
+					with open(p, 'r', encoding='utf-8', errors='ignore') as f:
+						text.setPlainText(f.read())
+					_initial_set = True
+			except Exception:
+				pass
 		if not _initial_set:
 			try:
 				buf = getattr(self, '_raw_log_buffer', '')
