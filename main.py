@@ -675,12 +675,6 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			if os_sel not in ("Yocto", "Ubuntu"):
 				self._show_info_dialog("Not Supported", "Load Binary is supported for Yocto, Ubuntu, or AAOS.")
 				return
-			# For Yocto/Ubuntu, ensure the log file path points to the Linux status file
-			try:
-				if hasattr(self, 'log_file_edit'):
-					self.log_file_edit.setText("/stress_tools/stress_tool_status.txt")
-			except Exception:
-				pass
 			# Refresh core count dynamically by querying Linux via hidden UART
 			self._update_core_count_from_linux()
 			# Rebuild core UI and active-graph list
@@ -1577,55 +1571,28 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			QtWidgets.QMessageBox.critical(self, "UART Connect Failed", f"Failed to open {linux_port} at 921600.")
 			self._on_stop()
 			return
-		# Ensure the console is visible and set to UART protocol explicitly
 		try:
 			self.btn_uart_toggle.setChecked(True)
 			self.main_stack.setCurrentIndex(1)
-			if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'proto_combo'):
-				self.comm_console.proto_combo.setCurrentIndex(0)  # UART
-				# Trigger protocol UI refresh immediately
-				self.comm_console._on_proto_changed()
 		except Exception:
 			pass
 		if not cmd_line:
 			QtWidgets.QMessageBox.warning(self, "No Command", "Generated command is empty.")
 		else:
-			# Run the stress tool in background, then stream the status file over UART
 			self.comm_console.send_commands([
 				"cd /",
 				"cd stress_tools",
 				cmd_line,
-				# Show any existing content first (if file already exists), then follow new lines
-				"if [ -e /stress_tools/stress_tool_status.txt ]; then cat /stress_tools/stress_tool_status.txt; fi",
-				"tail -n 0 -F /stress_tools/stress_tool_status.txt",
 			], spacing_ms=400)
-			# Suppress local console echo so output is only visible in Show Log
-			try:
-				if hasattr(self, 'comm_console'):
-					self.comm_console.suppress_ui = True
-			except Exception:
-				pass
 		self._sample_timer.stop()
-		# Do not start local file tail for Linux; we stream via UART
+		tail_path = self.log_file_edit.text().strip()
+		if not tail_path:
+			QtWidgets.QMessageBox.warning(self, "No Log File", "Please specify the log file path.")
+			return
+		self._start_tail_file(tail_path)
 		self._start_schedule_timer()
 		self.btn_start.setEnabled(False)
 		self.btn_stop.setEnabled(True)
-		# Auto-open Show Log to display the status file
-		try:
-			QtCore.QTimer.singleShot(200, self._open_log_dialog)
-		except Exception:
-			pass
-		# Bridge UART console data into the Show Log buffer while running
-		try:
-			if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'data_received'):
-				# Disconnect previous to avoid duplicates
-				try:
-					self.comm_console.data_received.disconnect()
-				except Exception:
-					pass
-				self.comm_console.data_received.connect(lambda txt: setattr(self, '_raw_log_buffer', getattr(self, '_raw_log_buffer', '') + txt))
-		except Exception:
-			pass
 		try:
 			if hasattr(self, 'action_execute'):
 				self.action_execute.setEnabled(False)
@@ -2048,35 +2015,23 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		mono = QtGui.QFont("Consolas", 10)
 		text.setFont(mono)
 		v.addWidget(text, 1)
-		# Do not clear buffer here so any prior UART/ADB content remains visible
+		# Clear buffer before showing to guarantee "fresh" view
+		self._raw_log_buffer = ""
 		# Load initial snapshot:
-		# For AAOS: prefer remote adb cat; for Yocto/Ubuntu: prefer local file
+		# 1) Try remote AAOS file via adb cat (fast, current content)
+		# 2) Fallback to in-memory buffer
+		# 3) Fallback to current local tail file if any
 		_initial_set = False
 		try:
-			os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+			import subprocess
+			res = subprocess.run([
+				"adb", "shell", "cat", "/tmp/android_stress_tool/stress_tool_status.txt"
+			], capture_output=True, text=True, timeout=3)
+			if res.returncode == 0 and (res.stdout or res.stderr):
+				text.setPlainText(res.stdout or res.stderr)
+				_initial_set = True
 		except Exception:
-			os_sel = ""
-		if os_sel == "AAOS":
-			try:
-				import subprocess
-				res = subprocess.run([
-					"adb", "shell", "cat", "/tmp/android_stress_tool/stress_tool_status.txt"
-				], capture_output=True, text=True, timeout=3)
-				if res.returncode == 0 and (res.stdout or res.stderr):
-					text.setPlainText(res.stdout or res.stderr)
-					_initial_set = True
-			except Exception:
-				pass
-		else:
-			# Yocto/Ubuntu: read from local file if available
-			try:
-				p = getattr(self, '_file_tail_path', None) or (self.log_file_edit.text() if hasattr(self, 'log_file_edit') else "")
-				if p and os.path.exists(p):
-					with open(p, 'r', encoding='utf-8', errors='ignore') as f:
-						text.setPlainText(f.read())
-					_initial_set = True
-			except Exception:
-				pass
+			pass
 		if not _initial_set:
 			try:
 				buf = getattr(self, '_raw_log_buffer', '')
@@ -2111,27 +2066,6 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				pass
 		append_timer.timeout.connect(_pump)
 		append_timer.start()
-		# For Linux UART flows, also mirror UART chunks directly into the dialog
-		try:
-			if os_sel != "AAOS" and hasattr(self, 'comm_console') and hasattr(self.comm_console, 'data_received'):
-				# Define a slot that both appends to buffer and updates the dialog immediately
-				def _push_uart(txt: str) -> None:
-					try:
-						self._raw_log_buffer = getattr(self, '_raw_log_buffer', '') + (txt or '')
-						if txt:
-							text.moveCursor(QtGui.QTextCursor.End)
-							text.insertPlainText(txt)
-							text.moveCursor(QtGui.QTextCursor.End)
-					except Exception:
-						pass
-				self.comm_console.data_received.connect(_push_uart)
-				# Disconnect when dialog closes to avoid duplicate connections
-				try:
-					d.finished.connect(lambda _c, _s=None: self.comm_console.data_received.disconnect(_push_uart))
-				except Exception:
-					pass
-		except Exception:
-			pass
 		d.exec()
 
 	def _parse_stress_output(self, output: str) -> None:
