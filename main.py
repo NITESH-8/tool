@@ -1599,6 +1599,12 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				"if [ -e /stress_tools/stress_tool_status.txt ]; then cat /stress_tools/stress_tool_status.txt; fi",
 				"tail -n 0 -F /stress_tools/stress_tool_status.txt",
 			], spacing_ms=400)
+			# Suppress local console echo so output is only visible in Show Log
+			try:
+				if hasattr(self, 'comm_console'):
+					self.comm_console.suppress_ui = True
+			except Exception:
+				pass
 		self._sample_timer.stop()
 		# Do not start local file tail for Linux; we stream via UART
 		self._start_schedule_timer()
