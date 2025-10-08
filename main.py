@@ -2022,7 +2022,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Decide path based on target OS
 		os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
 		if os_sel in ("Yocto", "Ubuntu") and hasattr(self, 'comm_console'):
-			# Snapshot over UART without polluting console: use capture mode
+			# Snapshot over UART - try capture mode first, fallback to regular commands
 			text.setPlainText("Fetching latest status from device…")
 			# Ensure connected; if not, try best-effort connect
 			connected = bool(self.comm_console.uart_connect_btn.isChecked())
@@ -2037,27 +2037,54 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			if not connected:
 				text.setPlainText("Failed to connect to Linux UART.")
 			else:
-				# Unique end token
-				end_token = f"__END_OF_STATUS__{int(time.time()*1000)}__"
-				def _done(payload: str) -> None:
+				# Try capture mode if available, otherwise fallback to regular commands
+				if hasattr(self.comm_console, 'start_capture'):
+					# Use capture mode (clean, no console pollution)
+					end_token = f"__END_OF_STATUS__{int(time.time()*1000)}__"
+					def _done(payload: str) -> None:
+						try:
+							print(f"Capture completed, got {len(payload)} chars")
+							text.setPlainText(payload)
+							text.moveCursor(QtGui.QTextCursor.End)
+						except Exception as e:
+							print(f"Capture callback failed: {e}")
+							text.setPlainText(f"Error displaying captured data: {e}")
 					try:
-						print(f"Capture completed, got {len(payload)} chars")
-						text.setPlainText(payload)
-						text.moveCursor(QtGui.QTextCursor.End)
+						print(f"Starting capture with token: {end_token}")
+						self.comm_console.start_capture(end_token=end_token, timeout_ms=5000, on_complete=_done)
+						self.comm_console.send_commands_silent([
+							f"cat /stress_tools/stress_tool_status.txt; echo {end_token}",
+						], spacing_ms=200)
+						print("Commands sent silently")
 					except Exception as e:
-						print(f"Capture callback failed: {e}")
-						text.setPlainText(f"Error displaying captured data: {e}")
-				try:
-					print(f"Starting capture with token: {end_token}")
-					self.comm_console.start_capture(end_token=end_token, timeout_ms=5000, on_complete=_done)
-					# Use absolute path; send silently so commands themselves don't echo
-					self.comm_console.send_commands_silent([
-						f"cat /stress_tools/stress_tool_status.txt; echo {end_token}",
-					], spacing_ms=200)
-					print("Commands sent silently")
-				except Exception as e:
-					print(f"UART capture failed: {e}")
-					text.setPlainText(f"Failed to fetch status log over UART: {e}")
+						print(f"UART capture failed: {e}")
+						text.setPlainText(f"Failed to fetch status log over UART: {e}")
+				else:
+					# Fallback: use regular commands (will show in console but work)
+					text.setPlainText("Using fallback method - commands will appear in console...")
+					def _show_result():
+						# Get the current console content and extract the file content
+						try:
+							port = self.comm_console.uart_port_combo.currentText()
+							console_text = self.comm_console._port_logs.get(port, "")
+							# Find the last cat command output (simple heuristic)
+							lines = console_text.split('\n')
+							start_idx = -1
+							for i, line in enumerate(lines):
+								if 'cat /stress_tools/stress_tool_status.txt' in line:
+									start_idx = i + 1
+							if start_idx >= 0 and start_idx < len(lines):
+								file_content = '\n'.join(lines[start_idx:])
+								text.setPlainText(file_content)
+							else:
+								text.setPlainText("No status data found in console output")
+						except Exception as e:
+							text.setPlainText(f"Error parsing console output: {e}")
+					
+					# Send the command and wait a bit for response
+					self.comm_console.send_commands([
+						"cat /stress_tools/stress_tool_status.txt",
+					], spacing_ms=500, on_complete=_show_result)
 			# No live timer for UART snapshot; close dialog to fetch again later
 			d.exec()
 			return
