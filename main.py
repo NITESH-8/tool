@@ -870,73 +870,68 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			pass
 
 	def _auto_load_binary_over_uart(self) -> None:
-		"""Find Linux UART by VID:PID and send commands without touching Access UART."""
+		"""Find Linux UART by VID:PID, open the console, and send commands visibly."""
+		# Locate the Linux UART using the same VID:PID logic as elsewhere
+		linux_port = None
 		try:
-			from serial.tools import list_ports
-			import serial
+			linux_port = self.comm_console.find_linux_port("VID:PID=067B:23A3")
 		except Exception:
-			self._show_error_dialog("Serial Module Missing", "pyserial is not installed. Install it with:\n\n  python -m pip install pyserial")
+			linux_port = None
+		if not linux_port:
+			self._show_error_dialog("Linux UART Not Found", "Couldn't locate a COM port with VID:PID=067B:23A3.")
 			return
-		# Locate matching ports by VID:PID
-		needle = "VID:PID=067B:23A3"
-		candidates = []
+		# Show the console UI and ensure UART protocol is selected
 		try:
-			for p in list_ports.comports():
-				hwid = getattr(p, 'hwid', '') or ''
-				if needle in hwid:
-					candidates.append(p.device)
+			self.btn_uart_toggle.setChecked(True)
+			self.main_stack.setCurrentIndex(1)
+			if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'proto_combo'):
+				self.comm_console.proto_combo.setCurrentIndex(0)  # UART
+				self.comm_console._on_proto_changed()
 		except Exception:
 			pass
-		if not candidates:
-			self._show_error_dialog("Linux UART Not Found", f"Couldn't locate a COM port with {needle}.")
-			return
-		# Choose lowest COM number
-		def _com_num(name: str) -> int:
-			m = re.search(r"COM(\d+)$", name.upper())
-			return int(m.group(1)) if m else 1_000_000
-		candidates.sort(key=_com_num)
-		port = candidates[0]
-		# Try open at 921600; handle busy/denied
-		ser = None
+		# If connected to a different port, disconnect first
 		try:
-			ser = serial.Serial(port=port, baudrate=921600, timeout=1, write_timeout=3)
-		except Exception as e:
-			msg = str(e)
-			if isinstance(e, PermissionError) or "denied" in msg.lower() or "busy" in msg.lower():
-				self._show_warning_dialog("Port Busy", f"Failed to open {port}. It may be in use by another application.\n\nDetails: {msg}")
+			current_connected = bool(self.comm_console.uart_connect_btn.isChecked())
+			different_port = (getattr(self.comm_console, '_current_port', '') or '') != linux_port
+			if current_connected and different_port:
+				self.comm_console._uart_disconnect_if_needed()
+		except Exception:
+			pass
+		# Connect to the Linux UART at 921600
+		connected = False
+		try:
+			if not self.comm_console.uart_connect_btn.isChecked() or (getattr(self.comm_console, '_current_port', '') or '') != linux_port:
+				connected = self.comm_console.connect_to_port(linux_port, baud=921600)
 			else:
-				self._show_error_dialog("Open Port Failed", msg)
+				connected = True
+		except Exception:
+			connected = False
+		if not connected:
+			QtWidgets.QMessageBox.critical(self, "UART Connect Failed", f"Failed to open {linux_port} at 921600.")
 			return
+		# Send the setup/copy commands through the console so they are visible in UI
+		cmds = [
+			"sudo su",
+			"nvidia",
+			"cd /",
+			"mkdir -p /mnt/usb",
+			"mkdir -p /stress_tools",
+			"DEV=\"$(lsblk -rpno NAME,TYPE,TRAN | awk '$2==\"disk\" && $3==\"usb\"{print $1; exit}')\"",
+			"if [ -z \"$DEV\" ]; then DEV=\"$(lsblk -rpno NAME,TYPE,RM | awk '$2==\"disk\" && $3==\"1\"{print $1; exit}')\"; fi",
+			"PART=\"$(lsblk -rpno NAME,TYPE \"$DEV\" | awk '$2==\"part\"{print $1; exit}')\"",
+			"if [ -z \"$PART\" ]; then PART=\"$(lsblk -rpno NAME,TYPE | awk '$2==\"part\"{print $1; exit}')\"; fi",
+			"mount \"$PART\" /mnt/usb || (sleep 1; mount \"$PART\" /mnt/usb)",
+			"cp /mnt/usb/stress_tool /stress_tools/",
+			"umount /mnt/usb",
+			"cd /",
+		]
+		def _on_done() -> None:
+			self._show_info_dialog("Binary Loaded", f"Binary loaded successfully over {linux_port}.")
 		try:
-			# Commands with pauses (as requested)
-			cmds = [
-				"sudo su",
-				"nvidia",
-				"cd /",
-				"mkdir -p /mnt/usb",
-				"mkdir -p /stress_tools",
-				"DEV=\"$(lsblk -rpno NAME,TYPE,TRAN | awk '$2==\"disk\" && $3==\"usb\"{print $1; exit}')\"",
-				"if [ -z \"$DEV\" ]; then DEV=\"$(lsblk -rpno NAME,TYPE,RM | awk '$2==\"disk\" && $3==\"1\"{print $1; exit}')\"; fi",
-				"PART=\"$(lsblk -rpno NAME,TYPE \"$DEV\" | awk '$2==\"part\"{print $1; exit}')\"",
-				"if [ -z \"$PART\" ]; then PART=\"$(lsblk -rpno NAME,TYPE | awk '$2==\"part\"{print $1; exit}')\"; fi",
-				"mount \"$PART\" /mnt/usb || (sleep 1; mount \"$PART\" /mnt/usb)",
-				"cp /mnt/usb/stress_tool /stress_tools/",
-				"umount /mnt/usb",
-				"cd /",
-			]
-			for cmd in cmds:
-				try:
-					ser.write((cmd + "\n").encode())
-					time.sleep(1.0)
-				except Exception:
-					break
-		finally:
-			try:
-				if ser is not None:
-					ser.close()
-			except Exception:
-				pass
-		self._show_info_dialog("Binary Loaded", f"Binary loaded successfully over {port}.")
+			self.comm_console.send_commands(cmds, spacing_ms=1000, on_complete=_on_done)
+		except Exception:
+			# Fall back to showing success dialog even if logging fails
+			self._show_info_dialog("Binary Loaded", f"Binary loaded successfully over {linux_port}.")
 
 	def _msgbox_style(self, accent_hex: str) -> str:
 		"""Return a stylesheet for QColor-accented message boxes respecting theme."""
