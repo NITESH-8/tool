@@ -254,9 +254,14 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			
 			# Adaptive checkbox - centered under the header
 			adaptive_cb = QtWidgets.QCheckBox()
-			adaptive_cb.setToolTip(f"Enable adaptive mode for {name}")
+			adaptive_cb.setToolTip(f"Enable adaptive mode for {name} (requires {name} to be selected first)")
 			adaptive_cb.stateChanged.connect(self._on_adaptive_toggled)
-			adaptive_cb.setStyleSheet("QCheckBox { margin-left: 20px; }")  # Center the checkbox
+			adaptive_cb.setStyleSheet("""
+				QCheckBox { margin-left: 20px; }
+				QCheckBox:disabled { color: #7D8896; }
+				QCheckBox:disabled::indicator { background: #2A2F36; border: 1px solid #3A404A; }
+			""")
+			adaptive_cb.setEnabled(False)  # Initially disabled
 			sys_layout.addWidget(adaptive_cb, i, 1)  # Row i, Column 1
 			self.adaptive_checkbox_group[name] = adaptive_cb
 		
@@ -684,6 +689,21 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				_adb(["shell", "kill", pid])
 		except Exception:
 			pass
+
+	def _kill_stress_tool_via_uart(self) -> None:
+		"""Send pkill stress_tool command over UART to stop background stress_tool processes."""
+		try:
+			# Check if UART is connected and we have comm_console
+			if hasattr(self, 'comm_console') and self.comm_console.uart_connect_btn.isChecked():
+				# Send pkill command over UART
+				self.comm_console.send_commands([
+					"pkill stress_tool"
+				], spacing_ms=200)
+				print("Sent pkill stress_tool command over UART")
+			else:
+				print("UART not connected, cannot send pkill command")
+		except Exception as e:
+			print(f"Failed to send pkill command over UART: {e}")
 
 	def _on_load_binary(self) -> None:
 		"""Auto-run UART workflow or AAOS ADB workflow based on target OS."""
@@ -1293,6 +1313,17 @@ class PerformanceApp(QtWidgets.QMainWindow):
 	def _on_subsystem_toggled(self) -> None:
 		self.active_subsystems = [name for name, cb in self.checkbox_group.items() if cb.isChecked()]
 		
+		# Enable/disable adaptive checkboxes based on subsystem selection
+		if hasattr(self, 'adaptive_checkbox_group'):
+			for name, cb in self.checkbox_group.items():
+				adaptive_cb = self.adaptive_checkbox_group.get(name)
+				if adaptive_cb:
+					# Enable adaptive checkbox only if corresponding subsystem is selected
+					adaptive_cb.setEnabled(cb.isChecked())
+					# If subsystem is deselected, also uncheck the adaptive checkbox
+					if not cb.isChecked() and adaptive_cb.isChecked():
+						adaptive_cb.setChecked(False)
+		
 		# Show/hide CPU cores section when CPU is selected
 		cpu_selected = self.checkbox_group[Subsystem.CPU].isChecked()
 		self.cpu_cores_group.setVisible(cpu_selected)
@@ -1750,11 +1781,13 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Stop internal sampler
 		self._sample_timer.stop()
 		# No test mode
-		# Kill AAOS process if running (best-effort)
+		# Kill processes based on OS
 		try:
 			os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
 			if os_sel == "AAOS":
 				self._kill_android_stress_tool_via_adb()
+			elif os_sel in ("Yocto", "Ubuntu"):
+				self._kill_stress_tool_via_uart()
 		except Exception:
 			pass
 
