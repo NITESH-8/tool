@@ -256,11 +256,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			adaptive_cb = QtWidgets.QCheckBox()
 			adaptive_cb.setToolTip(f"Enable adaptive mode for {name} (requires {name} to be selected first)")
 			adaptive_cb.stateChanged.connect(self._on_adaptive_toggled)
-			adaptive_cb.setStyleSheet("""
-				QCheckBox { margin-left: 20px; }
-				QCheckBox:disabled { color: #7D8896; }
-				QCheckBox:disabled::indicator { background: #2A2F36; border: 1px solid #3A404A; }
-			""")
+			adaptive_cb.setStyleSheet("QCheckBox { margin-left: 20px; }")  # Just center it
 			adaptive_cb.setEnabled(False)  # Initially disabled
 			sys_layout.addWidget(adaptive_cb, i, 1)  # Row i, Column 1
 			self.adaptive_checkbox_group[name] = adaptive_cb
@@ -1651,11 +1647,14 @@ class PerformanceApp(QtWidgets.QMainWindow):
 					cmd_line,
 				], spacing_ms=400)
 		self._sample_timer.stop()
-		tail_path = self.log_file_edit.text().strip()
-		if not tail_path:
-			QtWidgets.QMessageBox.warning(self, "No Log File", "Please specify the log file path.")
-			return
-		self._start_tail_file(tail_path)
+		# Only check for log file path for non-Yocto/Ubuntu OS (AAOS uses ADB, others use local file)
+		os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+		if os_sel not in ("Yocto", "Ubuntu"):
+			tail_path = self.log_file_edit.text().strip()
+			if not tail_path:
+				QtWidgets.QMessageBox.warning(self, "No Log File", "Please specify the log file path.")
+				return
+			self._start_tail_file(tail_path)
 		self._start_schedule_timer()
 		self.btn_start.setEnabled(False)
 		self.btn_stop.setEnabled(True)
