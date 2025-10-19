@@ -2008,12 +2008,13 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			# For Yocto/Ubuntu, show commands in UART console
 			os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
 			if os_sel in ("Yocto", "Ubuntu"):
-				# Clear UART console and add header message
+				# Add header message without clearing UART console history
 				if hasattr(self.comm_console, 'log'):
-					self.comm_console.log.clear()
-					self.comm_console.log.appendPlainText(f"=== Starting {os_sel} Test ===")
+					self.comm_console.log.appendPlainText(f"\n=== Starting {os_sel} Test ===")
 					self.comm_console.log.appendPlainText(f"Command: {cmd_line}")
 					self.comm_console.log.appendPlainText("=" * 50)
+					# Ensure cursor is at the end for smooth scrolling
+					self.comm_console.log.moveCursor(QtGui.QTextCursor.End)
 				
 				self.comm_console.send_commands([
 					"cd /",
