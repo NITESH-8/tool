@@ -238,9 +238,15 @@ class CommConsole(QtWidgets.QWidget):
 		self._soc_port_id = "VID:PID=067B:23A3"
 		# ADB runtime state
 		self._adb_connected = False
-		self._adb_serial = None  # type: ignore[assignment]
+		self._adb_serial = None
+		self._adb_shell_process = None
+		self._adb_shell_timer = None  # type: ignore[assignment]
 		self._adb_cmd_timer = QtCore.QTimer(self)
 		self._adb_cmd_timer.setSingleShot(True)
+		# Initialize ADB shell timer for interactive sessions
+		self._adb_shell_timer = QtCore.QTimer(self)
+		self._adb_shell_timer.setInterval(50)  # Check every 50ms for output
+		self._adb_shell_timer.timeout.connect(self._check_adb_shell_output)
 		# Populate ADB devices initially so the page shows data when selected
 		self._refresh_adb_devices()
 
@@ -384,21 +390,193 @@ class CommConsole(QtWidgets.QWidget):
 					raise RuntimeError(err or out or "Failed waiting for device")
 				# Simple version probe
 				_ = adb_version()
+				
+				# Start interactive ADB shell session
+				print(f"[DEBUG] Starting ADB shell for device: {serial}")
+				self._adb_shell_process = QtCore.QProcess(self)
+				self._adb_shell_process.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+				self._adb_shell_process.readyReadStandardOutput.connect(self._on_adb_shell_output)
+				self._adb_shell_process.readyReadStandardError.connect(self._on_adb_shell_output)
+				self._adb_shell_process.finished.connect(self._on_adb_shell_finished)
+				
+				# Start adb shell
+				args = ["adb"]
+				if serial:
+					args.extend(["-s", serial])
+				args.append("shell")
+				
+				self._adb_shell_process.start(args[0], args[1:])
+				print(f"[DEBUG] ADB shell process started, state: {self._adb_shell_process.state()}")
+				
+				# Wait for the process to start
+				if not self._adb_shell_process.waitForStarted(3000):
+					print("[DEBUG] Failed to start ADB shell process")
+					raise RuntimeError("Failed to start ADB shell")
+				
+				print("[DEBUG] ADB shell process started successfully")
 				self._adb_connected = True
 				self._adb_serial = serial
 				self.btn_adb_connect.setText("Disconnect")
-				# Show a note in log
+				
+				# Start the output checking timer
+				self._adb_shell_timer.start()
+				
+				# Show connection message and wait for initial prompt
 				if hasattr(self, 'log'):
 					self.log.appendPlainText(f"[ADB] Connected to {serial}")
+					self.log.appendPlainText("[ADB] Starting interactive shell...")
+				
+				# Wait for initial prompt
+				print("[DEBUG] Waiting for initial ADB shell prompt...")
+				for attempt in range(5):
+					if self._adb_shell_process.waitForReadyRead(1000):
+						print(f"[DEBUG] Data ready on attempt {attempt + 1}")
+						self._on_adb_shell_output()
+					else:
+						print(f"[DEBUG] No data ready on attempt {attempt + 1}")
+					
+					# Also try reading immediately
+					self._on_adb_shell_output()
+					
+					if self._adb_shell_process.bytesAvailable() == 0:
+						break
+				
+				print("[DEBUG] Finished waiting for initial ADB shell prompt")
+				
 			except Exception as e:
+				print(f"[DEBUG] ADB connect error: {e}")
 				QtWidgets.QMessageBox.critical(self, "ADB Connect Failed", str(e))
 				self.btn_adb_connect.setChecked(False)
 		else:
+			# Disconnect ADB shell
+			if self._adb_shell_process:
+				print("[DEBUG] Stopping ADB shell process")
+				self._adb_shell_process.terminate()
+				self._adb_shell_process.waitForFinished(3000)
+				self._adb_shell_process = None
+			
+			if self._adb_shell_timer:
+				self._adb_shell_timer.stop()
+			
 			self._adb_connected = False
 			self._adb_serial = None
 			self.btn_adb_connect.setText("Connect")
 			if hasattr(self, 'log'):
 				self.log.appendPlainText("[ADB] Disconnected")
+
+	def _on_adb_shell_output(self) -> None:
+		"""Handle output from ADB shell process."""
+		try:
+			if self._adb_shell_process is None:
+				return
+			
+			# Check if process is still running
+			if self._adb_shell_process.state() != QtCore.QProcess.Running:
+				return
+			
+			# Read from both stdout and stderr separately
+			stdout_data = self._adb_shell_process.readAllStandardOutput().data()
+			stderr_data = self._adb_shell_process.readAllStandardError().data()
+			
+			# Process stdout
+			if stdout_data:
+				try:
+					text = stdout_data.decode(errors='replace')
+					print(f"[DEBUG] ADB shell stdout: {repr(text)}")
+					
+					# Check if this looks like an Android shell prompt
+					if self._detect_android_prompt(text):
+						print(f"[DEBUG] Android prompt detected in ADB shell stdout: {repr(text)}")
+					
+					# Display the text immediately
+					if hasattr(self, 'log'):
+						self.log.moveCursor(QtGui.QTextCursor.End)
+						self.log.insertPlainText(text)
+						self.log.moveCursor(QtGui.QTextCursor.End)
+						self.log.repaint()
+				except Exception as e:
+					print(f"[DEBUG] Error decoding ADB stdout: {e}")
+			
+			# Process stderr
+			if stderr_data:
+				try:
+					text = stderr_data.decode(errors='replace')
+					print(f"[DEBUG] ADB shell stderr: {repr(text)}")
+					
+					# Check if this looks like an Android shell prompt
+					if self._detect_android_prompt(text):
+						print(f"[DEBUG] Android prompt detected in ADB shell stderr: {repr(text)}")
+					
+					# Display the text immediately
+					if hasattr(self, 'log'):
+						self.log.moveCursor(QtGui.QTextCursor.End)
+						self.log.insertPlainText(text)
+						self.log.moveCursor(QtGui.QTextCursor.End)
+						self.log.repaint()
+				except Exception as e:
+					print(f"[DEBUG] Error decoding ADB stderr: {e}")
+					
+		except Exception as e:
+			print(f"[DEBUG] Error in _on_adb_shell_output: {e}")
+
+	def _check_adb_shell_output(self) -> None:
+		"""Periodically check for ADB shell output to catch any missed prompts."""
+		try:
+			if self._adb_shell_process is not None and self._adb_shell_process.state() == QtCore.QProcess.Running:
+				bytes_available = self._adb_shell_process.bytesAvailable()
+				can_read_line = self._adb_shell_process.canReadLine()
+				
+				if bytes_available > 0 or can_read_line:
+					print(f"[DEBUG] ADB shell timer check - bytes available: {bytes_available}, can read line: {can_read_line}")
+				
+				# Check if there's data available
+				if bytes_available > 0:
+					self._on_adb_shell_output()
+				# Also try to read any pending data
+				if can_read_line:
+					self._on_adb_shell_output()
+				# Force a repaint to ensure any buffered output is displayed
+				if hasattr(self, 'log'):
+					self.log.repaint()
+		except Exception as e:
+			print(f"[DEBUG] Error in _check_adb_shell_output: {e}")
+
+	def _on_adb_shell_finished(self, exit_code: int, exit_status: int) -> None:
+		"""Handle ADB shell process finished."""
+		print(f"[DEBUG] ADB shell process finished with code: {exit_code}, status: {exit_status}")
+		if hasattr(self, 'log'):
+			self.log.appendPlainText(f"\n[ADB] Shell session ended (exit code: {exit_code})")
+		# Reset connection state
+		self._adb_connected = False
+		self._adb_serial = None
+		self.btn_adb_connect.setChecked(False)
+		self.btn_adb_connect.setText("Connect")
+		if self._adb_shell_timer:
+			self._adb_shell_timer.stop()
+
+	def _detect_android_prompt(self, text: str) -> bool:
+		"""Detect if the text contains an Android shell prompt."""
+		import re
+		prompt_patterns = [
+			r'root@[^:]+:/#\s*$',  # root@device:/#
+			r'[^@]+@[^:]+:/#\s*$',  # user@device:/#
+			r'#\s*$',               # Just #
+			r'\$\s*$',              # Just $
+			r'root@[^:]+:/#\s*',    # root@device:/# (with content after)
+			r'[^@]+@[^:]+:/#\s*',   # user@device:/# (with content after)
+			r'root@[^:]+:/#',       # root@device:/# (anywhere in text)
+			r'[^@]+@[^:]+:/#',      # user@device:/# (anywhere in text)
+			r'^#\s*',               # # at start of line
+			r'^\$\s*',              # $ at start of line
+			r'#\s*$',               # # at end of line
+			r'\$\s*$',              # $ at end of line
+		]
+		
+		for pattern in prompt_patterns:
+			if re.search(pattern, text, re.MULTILINE):
+				print(f"[DEBUG] ADB prompt pattern matched: {pattern}")
+				return True
+		return False
 
 		# ===== UART handlers (class methods) =====
 	def _on_uart_connect_toggle(self, checked: bool) -> None:
@@ -627,16 +805,32 @@ class CommConsole(QtWidgets.QWidget):
 				if hasattr(self, 'input'):
 					self.input.clear()
 			elif idx == 2 and self._adb_connected:
-				serial = self._adb_serial
-				code, out, err = adb_shell(serial, msg)
-				if hasattr(self, 'log'):
-					self.log.moveCursor(QtGui.QTextCursor.End)
-					self.log.insertPlainText((out + ("\n" if out else "")) or "")
-					if err:
-						self.log.insertPlainText((err + "\n"))
-					self.log.moveCursor(QtGui.QTextCursor.End)
-				if hasattr(self, 'input'):
-					self.input.clear()
+				# Send command to interactive ADB shell
+				if self._adb_shell_process and self._adb_shell_process.state() == QtCore.QProcess.Running:
+					print(f"[DEBUG] Sending command to ADB shell: {msg}")
+					# Echo the command to the terminal (like a real terminal does)
+					if hasattr(self, 'log'):
+						self.log.appendPlainText(f"$ {msg}")
+					# Send the command to the ADB shell process
+					self._adb_shell_process.write((msg + "\n").encode())
+					self._adb_shell_process.waitForBytesWritten(100)
+					# Wait a moment for output to be available
+					self._adb_shell_process.waitForReadyRead(100)
+					if hasattr(self, 'input'):
+						self.input.clear()
+				else:
+					print("[DEBUG] ADB shell process not running, falling back to single command")
+					# Fallback to single command execution
+					serial = self._adb_serial
+					code, out, err = adb_shell(serial, msg)
+					if hasattr(self, 'log'):
+						self.log.moveCursor(QtGui.QTextCursor.End)
+						self.log.insertPlainText((out + ("\n" if out else "")) or "")
+						if err:
+							self.log.insertPlainText((err + "\n"))
+						self.log.moveCursor(QtGui.QTextCursor.End)
+					if hasattr(self, 'input'):
+						self.input.clear()
 		except Exception:
 			# Suppress errors from stray focus or non-UART contexts
 			pass
