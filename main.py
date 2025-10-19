@@ -855,6 +855,9 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self.combo_target_os.currentTextChanged.connect(self._on_os_changed)
 		self.selected_target_os = self.combo_target_os.currentText()
 		toolbar.addWidget(self.combo_target_os)
+		
+		# Initialize OS-specific running states
+		self.os_running_states = {"Yocto": False, "Ubuntu": False, "AAOS": False}
 		# Load Binary button between OS dropdown and Execute Test
 		self.btn_load_binary = QtWidgets.QToolButton()
 		self.btn_load_binary.setText("Load Binary")
@@ -1841,6 +1844,12 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			self.states[name].values.clear()
 		for core_id in self.core_states:
 			self.core_states[core_id].values.clear()
+		# Track running state per OS
+		os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+		if not hasattr(self, 'os_running_states'):
+			self.os_running_states = {"Yocto": False, "Ubuntu": False, "AAOS": False}
+		
+		self.os_running_states[os_sel] = True
 		self.is_running = True
 		duration_s = int(self.duration_spin.value())
 		self.end_time_epoch = get_timestamp() + duration_s
@@ -2060,17 +2069,23 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self._stop_tail_file()
 
 	def _on_stop(self) -> None:
-		"""Stop the current test and reset button states."""
+		"""Stop the test for the currently selected OS."""
 		print("[DEBUG] Stop button clicked")
 		os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
 		print(f"[DEBUG] Stopping test for OS: {os_sel}")
 		
-		self.is_running = False
-		self._stop_process()
-		self.end_time_epoch = None
+		# Mark this OS as not running
+		if hasattr(self, 'os_running_states'):
+			self.os_running_states[os_sel] = False
 		
-		# Stop schedule timer
-		self._stop_schedule_timer()
+		# Update global running state
+		self.is_running = any(self.os_running_states.values()) if hasattr(self, 'os_running_states') else False
+		
+		# Stop processes and timers
+		self._stop_process()
+		if not self.is_running:  # Only stop timers if no OS has running tests
+			self.end_time_epoch = None
+			self._stop_schedule_timer()
 		
 		# OS-specific cleanup
 		try:
@@ -2083,16 +2098,25 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		except Exception as e:
 			print(f"[DEBUG] Error during OS-specific cleanup: {e}")
 		
-		# Reset button states
-		self._reset_button_states()
+		# Update button states for current OS
+		self._update_button_states_for_os(os_sel)
 
 	def _on_process_finished(self) -> None:
 		"""Handle when a test process finishes naturally."""
 		print("[DEBUG] Test process finished naturally")
-		self.is_running = False
+		os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+		
+		# Mark this OS as not running
+		if hasattr(self, 'os_running_states'):
+			self.os_running_states[os_sel] = False
+		
+		# Update global running state
+		self.is_running = any(self.os_running_states.values()) if hasattr(self, 'os_running_states') else False
+		
 		self._stop_process()
-		# Reset button states when test completes
-		self._reset_button_states()
+		
+		# Update button states for current OS
+		self._update_button_states_for_os(os_sel)
 
 	def _on_process_output(self) -> None:
 		now = get_timestamp()
@@ -2114,7 +2138,14 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		try:
 			if "Stress test completed" in getattr(self, '_raw_log_buffer', ''):
 				print("[DEBUG] AAOS test completed naturally")
-				self._reset_button_states()
+				# Mark AAOS as not running
+				if hasattr(self, 'os_running_states'):
+					self.os_running_states["AAOS"] = False
+				# Update global running state
+				self.is_running = any(self.os_running_states.values()) if hasattr(self, 'os_running_states') else False
+				# Update button states for current OS
+				current_os = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+				self._update_button_states_for_os(current_os)
 		except Exception:
 			pass
 
@@ -2422,17 +2453,46 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		d.exec()
 
 	def _on_os_changed(self, new_os: str) -> None:
-		"""Handle OS dropdown changes - reset button states and stop any running processes."""
+		"""Handle OS dropdown changes - update button states based on current OS running state."""
 		print(f"[DEBUG] OS changed to: {new_os}")
 		self.selected_target_os = new_os
 		
-		# If a test is currently running, stop it first
-		if self.is_running:
-			print("[DEBUG] Stopping current test due to OS change")
-			self._on_stop()
+		# Initialize OS running states if not exists
+		if not hasattr(self, 'os_running_states'):
+			self.os_running_states = {"Yocto": False, "Ubuntu": False, "AAOS": False}
 		
-		# Reset button states to default
-		self._reset_button_states()
+		# Update button states based on the selected OS
+		self._update_button_states_for_os(new_os)
+
+	def _update_button_states_for_os(self, os_name: str) -> None:
+		"""Update button states based on whether the selected OS has a running test."""
+		print(f"[DEBUG] Updating button states for OS: {os_name}")
+		
+		# Check if this OS has a running test
+		is_running = self.os_running_states.get(os_name, False)
+		print(f"[DEBUG] OS {os_name} running state: {is_running}")
+		
+		if is_running:
+			# This OS has a running test - show stop button
+			self.btn_start.setEnabled(False)
+			self.btn_stop.setEnabled(True)
+			self.duration_spin.setEnabled(False)
+			print("[DEBUG] Showing stop button for running test")
+		else:
+			# This OS has no running test - show execute button
+			self.btn_start.setEnabled(True)
+			self.btn_stop.setEnabled(False)
+			self.duration_spin.setEnabled(True)
+			print("[DEBUG] Showing execute button for idle OS")
+		
+		# Update action states
+		try:
+			if hasattr(self, 'action_execute'):
+				self.action_execute.setEnabled(not is_running)
+			if hasattr(self, 'action_stop'):
+				self.action_stop.setEnabled(is_running)
+		except Exception:
+			pass
 
 	def _reset_button_states(self) -> None:
 		"""Reset all button states to their default (ready to start) state."""
