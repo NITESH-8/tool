@@ -558,36 +558,6 @@ class CommConsole(QtWidgets.QWidget):
 						text = data.decode(errors="replace")
 					except Exception:
 						text = str(data)
-					
-					# Handle capture mode
-					if self._capture_active:
-						self._capture_buffer += text
-						print(f"[DEBUG] Capture buffer updated, length: {len(self._capture_buffer)}")
-						
-						# Check for end token
-						if self._capture_end_token and self._capture_end_token in self._capture_buffer:
-							print(f"[DEBUG] End token found: {self._capture_end_token}")
-							# Extract content up to (but not including) the end token
-							end_pos = self._capture_buffer.find(self._capture_end_token)
-							content = self._capture_buffer[:end_pos]
-							print(f"[DEBUG] Extracted content length: {len(content)}")
-							
-							# Call the callback
-							callback = self._capture_callback
-							self._capture_active = False
-							self._capture_buffer = ""
-							self._capture_end_token = None
-							self._capture_callback = None
-							self._capture_timeout.stop()
-							
-							if callback:
-								try:
-									callback(content)
-								except Exception as e:
-									print(f"[DEBUG] Capture callback error: {e}")
-						return  # Don't process normally during capture
-					
-					# Normal processing (not in capture mode)
 					port = self.uart_port_combo.currentText()
 					self._port_logs[port] = self._port_logs.get(port, "") + text
 					if hasattr(self, 'log'):
