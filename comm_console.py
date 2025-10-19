@@ -246,21 +246,25 @@ class CommConsole(QtWidgets.QWidget):
 
 	def _on_proto_changed(self) -> None:
 		idx = self.proto_combo.currentIndex()
+		print(f"[DEBUG] Protocol changed to index: {idx}")
 		self.proto_stack.setCurrentIndex(idx)
-		# Clear the console areas
-		if hasattr(self, 'log'):
-			self.log.clear()
+		# Clear only the input area, preserve log history
 		if hasattr(self, 'input'):
 			self.input.clear()
+		# Don't clear the log - preserve UART console history
 		# When switching protocols, disconnect UART and clear settings
 		if idx != 0:
+			print(f"[DEBUG] Switching to non-UART protocol")
 			self._uart_disconnect_if_needed()
 			self._reset_uart_controls(clear_ports=False)
 		else:
+			print(f"[DEBUG] Switching to UART protocol")
 			# Selected UART: reset and repopulate fresh
 			self._reset_uart_controls(clear_ports=True)
 			self.refresh_ports()
-			self._on_port_changed(self.uart_port_combo.currentText())
+			port = self.uart_port_combo.currentText()
+			print(f"[DEBUG] Calling _on_port_changed with port: {port}")
+			self._on_port_changed(port)
 		# When switching to ADB, refresh device list (no host prompt)
 		if idx == 2:
 			self._refresh_adb_devices()
@@ -535,9 +539,34 @@ class CommConsole(QtWidgets.QWidget):
 				self._port_logs[prev] = self.log.toPlainText()
 			self._current_port = port
 			if hasattr(self, 'log'):
-				self.log.setPlainText(self._port_logs.get(port, ""))
+				# Don't replace the entire log content - preserve existing content
+				# Only append port-specific content if it exists and is different
+				port_content = self._port_logs.get(port, "")
+				current_content = self.log.toPlainText()
+				
+				print(f"[DEBUG] Port changed to: {port}")
+				print(f"[DEBUG] Port content length: {len(port_content)}")
+				print(f"[DEBUG] Current content length: {len(current_content)}")
+				
+				# If switching to a port that has content and current log is empty, load port content
+				if port_content and not current_content.strip():
+					print(f"[DEBUG] Loading port content (log was empty)")
+					self.log.setPlainText(port_content)
+				# If port has content and it's not already in the current log, append it
+				elif port_content and port_content not in current_content:
+					print(f"[DEBUG] Appending port content")
+					self.log.appendPlainText(f"\n--- Port {port} Content ---")
+					self.log.appendPlainText(port_content)
+				# If port has no content but current log has content, keep current content
+				elif not port_content and current_content.strip():
+					print(f"[DEBUG] Port has no content, keeping current content")
+					# Do nothing - keep current content
+				else:
+					print(f"[DEBUG] No port content to load/append")
+				
 				self.log.moveCursor(QtGui.QTextCursor.End)
-		except Exception:
+		except Exception as e:
+			print(f"[DEBUG] Error in _on_port_changed: {e}")
 			pass
 
 	def _reset_uart_controls(self, clear_ports: bool) -> None:
