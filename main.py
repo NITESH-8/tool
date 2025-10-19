@@ -1,5 +1,29 @@
+"""
+Performance GUI Application - Real-time System Performance Monitoring and Stress Testing Dashboard
+
+This module provides a comprehensive GUI application for monitoring and testing system performance
+across multiple subsystems (CPU, GPU, DRAM) with real-time visualization, data collection,
+and stress testing capabilities.
+
+Key Features:
+- Real-time performance monitoring with live graphs
+- Per-core CPU utilization tracking
+- GPU monitoring via NVIDIA NVML
+- DRAM usage monitoring
+- Stress testing with external tools
+- Data export (CSV, PNG)
+- Multi-protocol communication console (UART, ADB, SSH, CMD)
+- Scheduled performance target changes
+- Harmonic and sudden target transitions
+
+Author: Performance GUI Team
+Version: 1.0
+Dependencies: PySide6, pyqtgraph, pynvml, pyserial
+"""
+
 from __future__ import annotations
 
+# Standard library imports
 import csv
 import os
 import re
@@ -8,10 +32,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+# GUI framework imports
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from .data_sources import Subsystem, get_timestamp, get_cpu_core_count, get_cpu_core_percent
+# Local module imports
+from .data_sources import Subsystem, get_timestamp
 from .adb_utils import (
 	is_adb_available as _adb_available,
 	list_devices as _adb_list_devices,
@@ -22,54 +48,117 @@ from .comm_console import CommConsole
 
 
 class TimeAxis(pg.AxisItem):
-	"""Custom bottom axis that formats seconds to friendly time strings.
-
-	- < 60s: show seconds with optional decimals (e.g., 12s, 12.5s)
-	- 1–60 min: show mm:ss (e.g., 2:05)
-	- >= 60 min: show h:mm (e.g., 1h05m)
 	"""
-
+	Custom time axis formatter for PyQtGraph plots.
+	
+	This class extends PyQtGraph's AxisItem to provide human-readable time formatting
+	on the X-axis of performance graphs. It automatically formats time values based
+	on the duration being displayed.
+	
+	Time Format Rules:
+	- < 60 seconds: Show seconds with optional decimals (e.g., "12s", "12.5s")
+	- 1-60 minutes: Show minutes:seconds format (e.g., "2:05", "15:30")
+	- >= 60 minutes: Show hours:minutes format (e.g., "1h05m", "2h30m")
+	
+	The formatting adapts based on the tick spacing to provide appropriate precision.
+	For small time intervals, decimal seconds are shown for better granularity.
+	
+	Attributes:
+		None (inherits from pg.AxisItem)
+	"""
+	
 	def tickStrings(self, values, scale, spacing):  # type: ignore[override]
+		"""
+		Convert numeric time values to formatted string labels for axis ticks.
+		
+		This method is called by PyQtGraph to generate tick labels. It handles
+		the conversion from raw time values (in seconds) to human-readable strings
+		with appropriate formatting based on the time range and tick spacing.
+		
+		Args:
+			values: List of numeric values representing time positions on the axis
+			scale: Scale factor applied to the values (may be None during layout)
+			spacing: Spacing between ticks (used to determine decimal precision)
+			
+		Returns:
+			List[str]: Formatted time strings for each tick position
+			
+		Note:
+			This method is defensive against None/0 values that PyQtGraph may pass
+			during initial layout calculations.
+		"""
 		# Be defensive: PyQtGraph may call with None/0 values during layout
 		labels: List[str] = []
+		
+		# Safely extract scale and spacing values with fallbacks
 		try:
 			sc = float(scale) if isinstance(scale, (int, float)) else 1.0
 			sps = float(spacing) if isinstance(spacing, (int, float)) and float(spacing) > 0 else 1.0
 		except Exception:
 			sc = 1.0
 			sps = 1.0
+			
+		# Process each tick value
 		for v in values:
 			try:
-				sec = float(v) * sc
+				sec = float(v) * sc  # Convert to actual seconds
 			except Exception:
 				sec = 0.0
-			if sec >= 3600:
+				
+			# Format based on time duration
+			if sec >= 3600:  # 1 hour or more
 				hours = int(sec // 3600)
 				minutes = int((sec % 3600) // 60)
 				labels.append(f"{hours}h{minutes:02d}m")
-			elif sec >= 60:
+			elif sec >= 60:  # 1 minute to 1 hour
 				minutes = int(sec // 60)
 				seconds = int(sec % 60)
 				labels.append(f"{minutes}:{seconds:02d}")
-			else:
-				# show 1 decimal when spacing is small
+			else:  # Less than 1 minute
+				# Show 1 decimal when spacing is small for better precision
 				if sps < 1:
 					labels.append(f"{sec:.1f}s")
 				else:
 					labels.append(f"{int(sec)}s")
+					
 		return labels
 
 
 def _nice_tick_seconds(raw_step: float) -> float:
-	"""Return a 'nice' tick step in seconds close to raw_step.
-
-	Uses 1-2-5 progression scaled by powers of 10.
+	"""
+	Calculate a 'nice' tick step value close to the raw step size.
+	
+	This utility function takes a raw time step value and returns a more
+	human-friendly tick spacing that follows the 1-2-5 progression pattern
+	scaled by powers of 10. This ensures that time axis ticks are evenly
+	spaced and easy to read.
+	
+	The 1-2-5 progression means tick steps will be multiples of:
+	1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, etc.
+	
+	Args:
+		raw_step (float): The desired raw step size in seconds
+		
+	Returns:
+		float: A 'nice' step size close to raw_step, or 1.0 if raw_step <= 0
+		
+	Example:
+		>>> _nice_tick_seconds(0.7)  # Returns 1.0
+		>>> _nice_tick_seconds(1.3)  # Returns 1.0
+		>>> _nice_tick_seconds(2.1)  # Returns 2.0
+		>>> _nice_tick_seconds(4.8)  # Returns 5.0
+		>>> _nice_tick_seconds(8.2)  # Returns 10.0
 	"""
 	if raw_step <= 0:
 		return 1.0
+		
 	import math
+	# Find the order of magnitude (power of 10)
 	exp = math.floor(math.log10(raw_step))
+	# Normalize to 1-10 range
 	frac = raw_step / (10 ** exp)
+	
+	# Apply 1-2-5 progression
 	if frac < 1.5:
 		nice = 1.0
 	elif frac < 3.5:
@@ -78,14 +167,37 @@ def _nice_tick_seconds(raw_step: float) -> float:
 		nice = 5.0
 	else:
 		nice = 10.0
+		
+	# Scale back to original magnitude
 	return nice * (10 ** exp)
 
 
+# Global constant defining the available performance subsystems
 SUBSYSTEMS = [Subsystem.CPU, Subsystem.GPU, Subsystem.DRAM]
 
 
 @dataclass
 class SubsystemState:
+	"""
+	Data class representing the state of a performance subsystem.
+	
+	This class holds all the data and UI elements associated with monitoring
+	a specific subsystem (CPU, GPU, or DRAM). It tracks performance values
+	over time, target values, and the corresponding PyQtGraph visualization
+	elements.
+	
+	Attributes:
+		name (str): The name of the subsystem (e.g., "CPU", "GPU", "DRAM")
+		target_percent (int): The target performance percentage (0-100)
+		values (List[Tuple[float, float]]): List of (timestamp, value) pairs
+		curve (Optional[pg.PlotDataItem]): PyQtGraph curve object for plotting
+		target_line (Optional[pg.InfiniteLine]): PyQtGraph line for target indicator
+		
+	Note:
+		The values list stores tuples of (timestamp, percentage) where:
+		- timestamp is Unix epoch time in seconds
+		- percentage is the subsystem utilization (0.0-100.0)
+	"""
 	name: str
 	target_percent: int = 50
 	values: List[Tuple[float, float]] = field(default_factory=list)
@@ -95,6 +207,25 @@ class SubsystemState:
 
 @dataclass
 class CoreState:
+	"""
+	Data class representing the state of a CPU core.
+	
+	This class is similar to SubsystemState but specifically for individual
+	CPU cores. It tracks per-core performance metrics and visualization
+	elements.
+	
+	Attributes:
+		core_id (int): The CPU core identifier (0-based index)
+		target_percent (int): The target performance percentage for this core (0-100)
+		values (List[Tuple[float, float]]): List of (timestamp, value) pairs
+		curve (Optional[pg.PlotDataItem]): PyQtGraph curve object for plotting
+		target_line (Optional[pg.InfiniteLine]): PyQtGraph line for target indicator
+		
+	Note:
+		The values list stores tuples of (timestamp, percentage) where:
+		- timestamp is Unix epoch time in seconds
+		- percentage is the core utilization (0.0-100.0)
+	"""
 	core_id: int
 	target_percent: int = 50
 	values: List[Tuple[float, float]] = field(default_factory=list)
@@ -103,25 +234,87 @@ class CoreState:
 
 
 class PerformanceApp(QtWidgets.QMainWindow):
+	"""
+	Main application class for the Performance Dashboard.
+	
+	This is the central class that orchestrates all functionality of the performance
+	monitoring and stress testing application. It provides a comprehensive GUI for
+	monitoring system performance across multiple subsystems (CPU, GPU, DRAM) with
+	real-time visualization, data collection, and stress testing capabilities.
+	
+	Key Features:
+	- Real-time performance monitoring with live graphs
+	- Per-core CPU utilization tracking
+	- GPU monitoring via NVIDIA NVML
+	- DRAM usage monitoring
+	- External stress tool integration
+	- Data export (CSV, PNG)
+	- Multi-protocol communication console
+	- Scheduled performance target changes
+	- Harmonic and sudden target transitions
+	
+	The application uses PyQtGraph for high-performance real-time plotting and
+	PySide6 for the GUI framework. It supports both internal sampling and external
+	stress tool integration for comprehensive performance testing.
+	
+	Attributes:
+		states (Dict[str, SubsystemState]): Performance data for each subsystem
+		core_states (Dict[int, CoreState]): Performance data for each CPU core
+		active_subsystems (List[str]): Currently monitored subsystems
+		active_cores (List[int]): Currently monitored CPU cores
+		is_running (bool): Whether monitoring is currently active
+		process (Optional[QtCore.QProcess]): External stress tool process
+		scheduled_changes (List[Tuple]): Scheduled target changes
+		active_harmonics (Dict): Active harmonic target transitions
+	"""
+	
 	def __init__(self) -> None:
+		"""
+		Initialize the Performance Dashboard application.
+		
+		This constructor sets up the main window, initializes all data structures,
+		creates the user interface, configures timers for data collection, and
+		establishes the communication console. The application starts in a
+		maximized window with a dark theme for professional appearance.
+		
+		The initialization process includes:
+		1. Window setup and basic configuration
+		2. Data structure initialization for subsystems and cores
+		3. UI construction and layout
+		4. Timer setup for data collection and file monitoring
+		5. Communication console initialization
+		6. Theme application and window display
+		
+		Note:
+			The application defaults to monitoring 7 CPU cores until the actual
+			core count is detected from the system.
+		"""
 		super().__init__()
+		
+		# Basic window configuration
 		self.setWindowTitle("Performance Dashboard")
 		self.resize(1200, 720)
 
+		# Initialize performance data structures
+		# Dictionary mapping subsystem names to their state objects
 		self.states: Dict[str, SubsystemState] = {name: SubsystemState(name=name) for name in SUBSYSTEMS}
+		# Dictionary mapping core IDs to their state objects (initialized later)
 		self.core_states: Dict[int, CoreState] = {}
+		# Lists of currently active subsystems and cores for monitoring
 		self.active_subsystems: List[str] = []
 		self.active_cores: List[int] = []
+		# Runtime state flags
 		self.is_running: bool = False
 		self.end_time_epoch: Optional[float] = None
 
+		# External process management
 		self.process: Optional[QtCore.QProcess] = None
 		self.line_buffer: bytes = b""
 
-		# Initialize CPU cores
+		# Initialize CPU cores (detects actual core count)
 		self._init_cpu_cores()
 		
-		# Initialize scheduling system
+		# Initialize scheduling system for target changes
 		# Each entry: (time_offset_seconds, subsystem, target_value, mode)
 		# mode: "sudden" or "harmonic"
 		self.scheduled_changes: List[Tuple[float, str, int, str]] = []
@@ -130,19 +323,21 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Active harmonic ramps: subsystem -> (start_time_s, end_time_s, start_value, end_value)
 		self.active_harmonics: Dict[str, Tuple[float, float, int, int]] = {}
 
+		# Build the user interface
 		self._build_ui()
 		self._build_toolbar()
 		self._configure_plot()
 		# Initialize the active combo with all subsystems
 		self._rebuild_active_combo()
-		# Start maximized with window controls visible
+		
+		# Display the window maximized with controls visible
 		self.showMaximized()
 		self._apply_dark_theme()
-		# Internal sampler (used when no external command is needed)
-		self._sample_timer = QtCore.QTimer(self)
-		self._sample_timer.setInterval(500)
-		self._sample_timer.timeout.connect(self._sample_metrics)
-		# File tail reader for stress tool output
+		
+		# Internal sampler timer removed - using external backend for data collection
+		
+		# File tail reader for stress tool output monitoring
+		# Monitors external stress tool output files for real-time data
 		self._file_tail_timer = QtCore.QTimer(self)
 		self._file_tail_timer.setInterval(500)
 		self._file_tail_timer.timeout.connect(self._read_stress_file_tail)
@@ -153,40 +348,90 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self._file_start_epoch: float = 0.0
 		self._file_watcher = QtCore.QFileSystemWatcher(self)
 		self._file_watcher.fileChanged.connect(lambda _p: self._read_stress_file_tail())
-		# Block playback queue and scheduler (emit blocks every 5s)
+		
+		# Block playback queue and scheduler (emit blocks every 250ms)
+		# Used for processing stress tool output in blocks
 		self._block_queue: List[Tuple[Optional[float], Dict[int, float], Optional[float], Optional[float]]] = []
 		self._next_block_due_epoch: Optional[float] = None
 		self._block_timer = QtCore.QTimer(self)
 		self._block_timer.setInterval(250)
 		self._block_timer.timeout.connect(self._maybe_emit_block)
+		
 		# Persistent parse state for partial blocks across timer ticks
+		# Maintains state when parsing incomplete data blocks
 		self._blk_active: bool = False
 		self._blk_cpu_overall: Optional[float] = None
 		self._blk_core_vals: Dict[int, float] = {}
 		self._blk_dram_val: Optional[float] = None
 		self._blk_gpu_val: Optional[float] = None
+		
 		# Raw log buffer used for Show Log (works for local tail and adb tail)
 		self._raw_log_buffer: str = ""
-		# Execution UI helpers
+		
+		# Execution UI helpers for process management
 		self._exec_info_msg: Optional[QtWidgets.QMessageBox] = None
 		self._exec_completed: bool = False
 
 	# No app-level event filter required; handled inside CommConsole
 
 	def _init_cpu_cores(self) -> None:
-		"""Initialize CPU core states."""
+		"""
+		Initialize CPU core states for monitoring.
+		
+		This method sets up the data structures needed to monitor individual
+		CPU cores. It creates CoreState objects for each core and sets a
+		default core count until the actual system core count is detected.
+		
+		The method:
+		1. Sets a default core count (7 cores) as a fallback
+		2. Creates CoreState objects for each core ID
+		3. Stores them in the core_states dictionary
+		
+		Note:
+			The actual core count is detected later during runtime when
+			the system metrics are first sampled. This default ensures
+			the application can start even if core detection fails.
+		"""
 		# Default to 7 cores until Linux reports actual core count
+		# This provides a reasonable fallback for most systems
 		self.core_count = 7
+		
+		# Create CoreState objects for each core
+		# Each core gets its own state object for independent monitoring
 		self.core_states = {i: CoreState(core_id=i) for i in range(self.core_count)}
 
 	def _build_ui(self) -> None:
+		"""
+		Build the main user interface layout.
+		
+		This method constructs the complete GUI layout including:
+		- Main window with central widget
+		- Left control panel with scrollable area
+		- Collapsible control panel with toggle handle
+		- Right side with performance graphs and communication console
+		- All control widgets and their layouts
+		
+		The UI is designed with a professional layout that maximizes
+		the space for performance graphs while keeping controls easily
+		accessible. The control panel can be collapsed to provide more
+		space for the graphs when needed.
+		
+		Layout Structure:
+		- Central widget with horizontal layout
+		- Left: Scrollable control panel (collapsible)
+		- Middle: Toggle handle for panel collapse/expand
+		- Right: Performance graphs and communication console
+		"""
+		# Create the central widget and set it as the main window's central widget
 		central = QtWidgets.QWidget(self)
 		central.setObjectName("rootCentral")
 		self.setCentralWidget(central)
 
+		# Main horizontal layout for the entire interface
 		root = QtWidgets.QHBoxLayout(central)
 
 		# Left panel inside a scroll area to avoid forcing huge window height
+		# This allows the control panel to scroll if there are many controls
 		controls_scroll = QtWidgets.QScrollArea()
 		controls_scroll.setWidgetResizable(True)
 		controls_container = QtWidgets.QWidget()
@@ -195,16 +440,21 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		controls.setContentsMargins(10, 10, 10, 10)
 		controls.setSpacing(10)
 		controls_scroll.setWidget(controls_container)
+		
 		# Keep reference for collapse/expand animation
 		self.controls_scroll = controls_scroll
 		self.controls_container = controls_container
 		self.controls_collapsed = False
 		self.controls_initial_width = 320
+		
+		# Configure the scroll area size and behavior
 		controls_scroll.setMinimumWidth(0)
 		controls_scroll.setMaximumWidth(self.controls_initial_width)
 		controls_scroll.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Expanding)
 		root.addWidget(controls_scroll, 0)
+		
 		# Slider-like handle next to the panel to toggle visibility (top-right aligned)
+		# This provides an intuitive way to hide/show the control panel
 		handle = QtWidgets.QToolButton()
 		handle.setObjectName("panelHandle")
 		handle.setCheckable(True)
@@ -218,6 +468,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		handle.setToolTip("Hide/Show controls")
 		handle.toggled.connect(lambda _: self._toggle_controls())
 		self.panel_handle = handle
+		
+		# Container for the toggle handle
 		handle_container = QtWidgets.QWidget()
 		handle_container.setFixedWidth(40)
 		vc = QtWidgets.QVBoxLayout(handle_container)
@@ -704,25 +956,39 @@ class PerformanceApp(QtWidgets.QMainWindow):
 	def _on_load_binary(self) -> None:
 		"""Auto-run UART workflow or AAOS ADB workflow based on target OS."""
 		try:
+			print("[DEBUG] Load Binary button clicked")
 			# Update tooltip to indicate automated flow
 			if hasattr(self, 'btn_load_binary'):
 				self.btn_load_binary.setToolTip("Auto loading via UART (no file selection)")
 			# Route based on OS selection
 			os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+			print(f"[DEBUG] Selected OS: {os_sel}")
+			
 			if os_sel == "AAOS":
+				print("[DEBUG] Using ADB workflow for AAOS")
 				self._load_binary_via_adb_aaos()
 				return
 			if os_sel not in ("Yocto", "Ubuntu"):
+				print(f"[DEBUG] OS {os_sel} not supported")
 				self._show_info_dialog("Not Supported", "Load Binary is supported for Yocto, Ubuntu, or AAOS.")
 				return
+			
+			print("[DEBUG] Using UART workflow for Yocto/Ubuntu")
 			# Refresh core count dynamically by querying Linux via hidden UART
+			print("[DEBUG] Step 1: Updating core count from Linux")
 			self._update_core_count_from_linux()
+			
 			# Rebuild core UI and active-graph list
+			print("[DEBUG] Step 2: Rebuilding core UI")
 			self._rebuild_core_ui()
+			print("[DEBUG] Step 3: Rebuilding active combo")
 			self._rebuild_active_combo()
+			print("[DEBUG] Step 4: Auto loading binary over UART")
 			self._auto_load_binary_over_uart()
-		except Exception:
-			pass
+		except Exception as e:
+			print(f"[DEBUG] Load binary error: {e}")
+			import traceback
+			traceback.print_exc()
 
 	def _load_binary_via_adb_aaos(self) -> None:
 		"""Send two adb commands to the embedded CMD terminal for AAOS.
@@ -784,43 +1050,73 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		try:
 			from serial.tools import list_ports
 			import serial
+			import re
+			
 			needle = "VID:PID=067B:23A3"
 			candidates = []
 			for p in list_ports.comports():
 				if needle in (getattr(p, 'hwid', '') or ''):
 					candidates.append(p.device)
+			
 			if not candidates:
+				print(f"[DEBUG] No UART ports found with VID:PID={needle}")
 				return
+			
 			def _com_num(name: str) -> int:
 				m = re.search(r"COM(\d+)$", name.upper())
 				return int(m.group(1)) if m else 1_000_000
 			candidates.sort(key=_com_num)
 			port = candidates[0]
+			print(f"[DEBUG] Using UART port: {port}")
+			
 			ser = None
 			try:
-				ser = serial.Serial(port=port, baudrate=921600, timeout=1, write_timeout=2)
-				# Send nproc and read back a line
+				ser = serial.Serial(port=port, baudrate=921600, timeout=3, write_timeout=2)
+				print(f"[DEBUG] Connected to {port}, sending nproc command...")
+				
+				# Send nproc command
 				ser.write(b"nproc\n")
-				time.sleep(0.5)
-				resp = ser.read(64).decode(errors='ignore')
+				ser.flush()  # Ensure command is sent
+				
+				# Wait a bit longer and read more data
+				time.sleep(1.0)
+				resp = ser.read(256).decode(errors='ignore')
+				print(f"[DEBUG] nproc response: {repr(resp)}")
+				
+				# Look for number in response
 				m = re.search(r"(\d+)", resp)
 				if m:
 					val = max(1, min(128, int(m.group(1))))
-					if val != getattr(self, 'core_count', val):
+					old_count = getattr(self, 'core_count', 0)
+					if val != old_count:
 						self.core_count = val
+						print(f"[DEBUG] Updated core count from {old_count} to {val}")
+					else:
+						print(f"[DEBUG] Core count already set to {val}")
+				else:
+					print(f"[DEBUG] No number found in nproc response: {resp}")
+					
+			except Exception as e:
+				print(f"[DEBUG] UART communication error: {e}")
 			finally:
 				try:
 					if ser is not None:
 						ser.close()
-				except Exception:
-					pass
-		except Exception:
-			pass
+						print(f"[DEBUG] Closed UART connection to {port}")
+				except Exception as e:
+					print(f"[DEBUG] Error closing UART: {e}")
+		except Exception as e:
+			print(f"[DEBUG] Core count detection failed: {e}")
 
 	def _rebuild_core_ui(self) -> None:
 		"""Recreate CPU cores UI based on self.core_count."""
 		if not hasattr(self, 'cores_layout'):
+			print("[DEBUG] cores_layout not found, skipping UI rebuild")
 			return
+		
+		core_count = getattr(self, 'core_count', 0)
+		print(f"[DEBUG] Rebuilding core UI with {core_count} cores")
+		
 		# Remove all existing items (widgets and sub-layouts) to avoid duplicates
 		self._clear_layout(self.cores_layout)
 		# Reset data structures
@@ -863,7 +1159,9 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		cpu_target_row.addStretch(1)
 		self.cores_layout.addLayout(cpu_target_row)
 		# Create rows per core
-		for core_id in range(getattr(self, 'core_count', 0)):
+		core_count = getattr(self, 'core_count', 0)
+		print(f"[DEBUG] Creating UI for {core_count} cores")
+		for core_id in range(core_count):
 			row_container = QtWidgets.QWidget()
 			core_row = QtWidgets.QHBoxLayout(row_container)
 			core_row.setContentsMargins(0, 0, 0, 0)
@@ -1646,7 +1944,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 					"cd stress_tools",
 					cmd_line,
 				], spacing_ms=400)
-		self._sample_timer.stop()
+		# _sample_timer removed - using external backend
 		# Only check for log file path for non-Yocto/Ubuntu OS (AAOS uses ADB, others use local file)
 		os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
 		if os_sel not in ("Yocto", "Ubuntu"):
@@ -1778,7 +2076,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			pass
 		self.duration_spin.setEnabled(True)
 		# Stop internal sampler
-		self._sample_timer.stop()
+		# _sample_timer removed - using external backend
 		# No test mode
 		# Kill processes based on OS
 		try:
@@ -1793,7 +2091,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 	def _on_process_finished(self) -> None:
 		self.is_running = False
 		self._stop_process()
-		self._sample_timer.stop()
+		# _sample_timer removed - using external backend
 
 	def _on_process_output(self) -> None:
 		now = get_timestamp()
@@ -1883,64 +2181,9 @@ class PerformanceApp(QtWidgets.QMainWindow):
 						self.states[name].values.append((ts, val))
 						break
 		
-		# If no specific core data found, try to get CPU core data from psutil
-		if Subsystem.CPU in self.active_subsystems and self.active_cores:
-			try:
-				core_percentages = get_cpu_core_percent()
-				for core_id in self.active_cores:
-					if core_id < len(core_percentages):
-						self.core_states[core_id].values.append((ts, core_percentages[core_id]))
-			except Exception:
-				pass
+		# psutil fallback removed - using external backend for data collection
 
-	def _sample_metrics(self) -> None:
-		if not self.is_running:
-			return
-		ts = get_timestamp()
-		
-		# Always collect data for all CPU cores, regardless of selection
-		try:
-			core_percentages = get_cpu_core_percent()
-			for core_id in range(getattr(self, 'core_count', len(core_percentages))):
-				if core_id < len(core_percentages):
-					core_value = max(0, min(100, core_percentages[core_id]))  # Clamp to 0-100%
-					self.core_states[core_id].values.append((ts, core_value))
-		except Exception:
-			pass
-		
-		# Always calculate and store CPU aggregate
-		try:
-			vals = get_cpu_core_percent()
-			avg = sum(vals) / max(1, len(vals))
-			cpu_value = max(0, min(100, avg))  # Clamp to 0-100%
-			self.states[Subsystem.CPU].values.append((ts, cpu_value))
-		except Exception:
-			pass
-		
-		# Always collect DRAM data
-		try:
-			import psutil
-			mem = psutil.virtual_memory()
-			dram_value = max(0, min(100, float(mem.percent)))  # Clamp to 0-100%
-			self.states[Subsystem.DRAM].values.append((ts, dram_value))
-		except Exception:
-			pass
-		
-		# Always collect GPU data
-		try:
-			import pynvml
-			pynvml.nvmlInit()
-			h = pynvml.nvmlDeviceGetHandleByIndex(0)
-			util = pynvml.nvmlDeviceGetUtilizationRates(h)
-			gpu_value = max(0, min(100, float(util.gpu)))  # Clamp to 0-100%
-			self.states[Subsystem.GPU].values.append((ts, gpu_value))
-			pynvml.nvmlShutdown()
-		except (ImportError, Exception):
-			# If no NVIDIA GPU or drivers, set GPU to 0
-			self.states[Subsystem.GPU].values.append((ts, 0.0))
-		
-		self._redraw_curve()
-		self._refresh_numeric_list()
+	# _sample_metrics function removed - using external backend for data collection
 
 	def _redraw_curve(self) -> None:
 		active = self.combo_active.currentText()
@@ -2087,42 +2330,54 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		if os_sel in ("Yocto", "Ubuntu") and hasattr(self, 'comm_console'):
 			# Snapshot over UART - try capture mode first, fallback to regular commands
 			text.setPlainText("Fetching latest status from device…")
+			print(f"[DEBUG] Opening log dialog for OS: {os_sel}")
+			
 			# Ensure connected; if not, try best-effort connect
 			connected = bool(self.comm_console.uart_connect_btn.isChecked())
+			print(f"[DEBUG] UART connected: {connected}")
+			
 			if not connected:
 				try:
 					linux_port = self.comm_console.find_linux_port("VID:PID=067B:23A3")
+					print(f"[DEBUG] Found Linux port: {linux_port}")
 					if linux_port:
 						connected = self.comm_console.connect_to_port(linux_port, baud=921600)
+						print(f"[DEBUG] Connection attempt result: {connected}")
 				except Exception as e:
-					print(f"UART connect failed: {e}")
+					print(f"[DEBUG] UART connect failed: {e}")
 					connected = False
+			
 			if not connected:
 				text.setPlainText("Failed to connect to Linux UART.")
+				print("[DEBUG] No UART connection available")
 			else:
+				print("[DEBUG] UART connected, attempting to fetch log")
 				# Try capture mode if available, otherwise fallback to regular commands
 				if hasattr(self.comm_console, 'start_capture'):
+					print("[DEBUG] Using capture mode")
 					# Use capture mode (clean, no console pollution)
 					end_token = f"__END_OF_STATUS__{int(time.time()*1000)}__"
 					def _done(payload: str) -> None:
 						try:
-							print(f"Capture completed, got {len(payload)} chars")
+							print(f"[DEBUG] Capture completed, got {len(payload)} chars")
+							print(f"[DEBUG] Captured content: {repr(payload[:200])}...")
 							text.setPlainText(payload)
 							text.moveCursor(QtGui.QTextCursor.End)
 						except Exception as e:
-							print(f"Capture callback failed: {e}")
+							print(f"[DEBUG] Capture callback failed: {e}")
 							text.setPlainText(f"Error displaying captured data: {e}")
 					try:
-						print(f"Starting capture with token: {end_token}")
-						self.comm_console.start_capture(end_token=end_token, timeout_ms=5000, on_complete=_done)
+						print(f"[DEBUG] Starting capture with token: {end_token}")
+						self.comm_console.start_capture(end_token=end_token, timeout_ms=10000, on_complete=_done)
 						self.comm_console.send_commands_silent([
 							f"cat /stress_tools/stress_tool_status.txt; echo {end_token}",
 						], spacing_ms=200)
-						print("Commands sent silently")
+						print("[DEBUG] Commands sent silently")
 					except Exception as e:
-						print(f"UART capture failed: {e}")
+						print(f"[DEBUG] UART capture failed: {e}")
 						text.setPlainText(f"Failed to fetch status log over UART: {e}")
 				else:
+					print("[DEBUG] Using fallback method")
 					# Fallback: use regular commands (will show in console but work)
 					text.setPlainText("Using fallback method - commands will appear in console...")
 					def _show_result():
@@ -2130,21 +2385,30 @@ class PerformanceApp(QtWidgets.QMainWindow):
 						try:
 							port = self.comm_console.uart_port_combo.currentText()
 							console_text = self.comm_console._port_logs.get(port, "")
+							print(f"[DEBUG] Console text length: {len(console_text)}")
+							print(f"[DEBUG] Console text preview: {repr(console_text[-500:])}")
+							
 							# Find the last cat command output (simple heuristic)
 							lines = console_text.split('\n')
 							start_idx = -1
 							for i, line in enumerate(lines):
 								if 'cat /stress_tools/stress_tool_status.txt' in line:
 									start_idx = i + 1
+									print(f"[DEBUG] Found cat command at line {i}, content starts at line {start_idx}")
 							if start_idx >= 0 and start_idx < len(lines):
 								file_content = '\n'.join(lines[start_idx:])
+								print(f"[DEBUG] Extracted file content length: {len(file_content)}")
+								print(f"[DEBUG] File content preview: {repr(file_content[:200])}")
 								text.setPlainText(file_content)
 							else:
+								print("[DEBUG] No cat command found in console output")
 								text.setPlainText("No status data found in console output")
 						except Exception as e:
+							print(f"[DEBUG] Error parsing console output: {e}")
 							text.setPlainText(f"Error parsing console output: {e}")
 					
 					# Send the command and wait a bit for response
+					print("[DEBUG] Sending cat command via UART")
 					self.comm_console.send_commands([
 						"cat /stress_tools/stress_tool_status.txt",
 					], spacing_ms=500, on_complete=_show_result)
@@ -2238,38 +2502,97 @@ class PerformanceApp(QtWidgets.QMainWindow):
 	# ===== END TEST MODE FUNCTIONS =====
 
 	def _on_export_csv(self) -> None:
+		"""
+		Export performance data to CSV file.
+		
+		This method allows users to export all collected performance data to a CSV file
+		for further analysis, reporting, or archival purposes. The exported data includes
+		timestamps, subsystem names, performance values, and target values.
+		
+		CSV Format:
+		- timestamp: Unix epoch time (integer)
+		- subsystem: Name of the subsystem or "Core X" for CPU cores
+		- value_percent: Performance value as percentage (3 decimal places)
+		- target_percent: Target value for the subsystem/core
+		
+		The method:
+		1. Checks if there is any data to export
+		2. Shows a file dialog for save location
+		3. Writes data in CSV format with proper headers
+		4. Includes data from both active subsystems and CPU cores
+		
+		Note:
+			Only data from currently active subsystems and cores is exported.
+			The file is saved with UTF-8 encoding for international compatibility.
+		"""
+		# Check if there is any data to export
 		has_data = any(self.states[name].values for name in self.active_subsystems) or any(self.core_states[core_id].values for core_id in self.active_cores)
 		if not has_data:
 			QtWidgets.QMessageBox.information(self, "Info", "No data to export.")
 			return
+			
+		# Show file dialog for save location
 		path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save CSV", os.path.join(os.getcwd(), "results.csv"), "CSV Files (*.csv)")
 		if not path:
 			return
+			
+		# Write CSV file with performance data
 		with open(path, "w", newline="", encoding="utf-8") as f:
 			writer = csv.writer(f)
+			# Write CSV header
 			writer.writerow(["timestamp", "subsystem", "value_percent", "target_percent"])
+			
+			# Export data from active subsystems
 			for name in self.active_subsystems:
 				state = self.states[name]
 				for ts, val in state.values:
 					writer.writerow([int(ts), name, f"{val:.3f}", state.target_percent])
+					
+			# Export data from active CPU cores
 			for core_id in self.active_cores:
 				state = self.core_states[core_id]
 				for ts, val in state.values:
 					writer.writerow([int(ts), f"Core {core_id}", f"{val:.3f}", state.target_percent])
 
 	def _on_export_png(self) -> None:
+		"""
+		Export the current performance graph to PNG image file.
+		
+		This method allows users to save the currently displayed performance graph
+		as a high-quality PNG image for reports, presentations, or documentation.
+		The exported image is 1200 pixels wide for good resolution.
+		
+		Export Process:
+		1. Check if there is an active graph to export
+		2. Show file dialog for save location
+		3. Use PyQtGraph's ImageExporter for high-quality export
+		4. Fall back to widget grab if exporter fails
+		
+		The method uses PyQtGraph's built-in ImageExporter for optimal quality,
+		but falls back to a simple widget grab if the exporter is not available.
+		
+		Note:
+			The exported image will show the currently selected subsystem/core
+			graph with all its current data and formatting.
+		"""
+		# Check if there is an active graph to export
 		if self.combo_active.currentText() == "":
 			QtWidgets.QMessageBox.information(self, "Info", "No active graph to export.")
 			return
+			
+		# Show file dialog for save location
 		path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save PNG", os.path.join(os.getcwd(), "graph.png"), "PNG Files (*.png)")
 		if not path:
 			return
+			
+		# Try to use PyQtGraph's high-quality ImageExporter
 		try:
 			from pyqtgraph.exporters import ImageExporter
 			exporter = ImageExporter(self.plot_widget.plotItem)
-			exporter.parameters()["width"] = 1200
+			exporter.parameters()["width"] = 1200  # Set width to 1200 pixels
 			exporter.export(path)
 		except Exception:
+			# Fall back to simple widget grab if exporter fails
 			pixmap = self.plot_widget.grab()
 			pixmap.save(path, "PNG")
 
