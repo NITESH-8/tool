@@ -2236,7 +2236,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 
 	def _on_process_finished(self) -> None:
 		"""Handle when a test process finishes naturally."""
-		print("[DEBUG] Test process finished naturally")
+		print("[DEBUG] test process finished naturally")
 		os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
 		
 		# Mark this OS as not running
