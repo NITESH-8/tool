@@ -1935,17 +1935,28 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		try:
 			self.btn_uart_toggle.setChecked(True)
 			self.main_stack.setCurrentIndex(1)
+			# Switch to UART protocol to show the commands
+			if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'proto_combo'):
+				self.comm_console.proto_combo.setCurrentIndex(0)  # UART
+				self.comm_console._on_proto_changed()
 		except Exception:
 			pass
 		if not cmd_line:
 			QtWidgets.QMessageBox.warning(self, "No Command", "Generated command is empty.")
 		else:
-			# For Yocto/Ubuntu, do not tail in the console; keep it clean and interactive
+			# For Yocto/Ubuntu, show commands in UART console
 			os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
 			if os_sel in ("Yocto", "Ubuntu"):
+				# Clear UART console and add header message
+				if hasattr(self.comm_console, 'log'):
+					self.comm_console.log.clear()
+					self.comm_console.log.appendPlainText(f"=== Starting {os_sel} Test ===")
+					self.comm_console.log.appendPlainText(f"Command: {cmd_line}")
+					self.comm_console.log.appendPlainText("=" * 50)
+				
 				self.comm_console.send_commands([
 					"cd /",
-					"cd stress_tools",
+					"cd stress_tools", 
 					cmd_line,
 				], spacing_ms=400)
 			else:
@@ -2095,6 +2106,10 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			elif os_sel in ("Yocto", "Ubuntu"):
 				print("[DEBUG] Stopping Linux test")
 				self._kill_stress_tool_via_uart()
+				# Add completion message to UART console
+				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log'):
+					self.comm_console.log.appendPlainText(f"\n=== {os_sel} Test Stopped ===")
+					self.comm_console.log.appendPlainText("=" * 50)
 		except Exception as e:
 			print(f"[DEBUG] Error during OS-specific cleanup: {e}")
 		
@@ -2112,6 +2127,11 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		
 		# Update global running state
 		self.is_running = any(self.os_running_states.values()) if hasattr(self, 'os_running_states') else False
+		
+		# Add completion message to UART console for Linux tests
+		if os_sel in ("Yocto", "Ubuntu") and hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log'):
+			self.comm_console.log.appendPlainText(f"\n=== {os_sel} Test Completed ===")
+			self.comm_console.log.appendPlainText("=" * 50)
 		
 		self._stop_process()
 		
