@@ -50,5 +50,4 @@ def get_timestamp() -> float:
 	import time
 	return time.time()
 
-
 # CPU data collection functions removed - using external backend
