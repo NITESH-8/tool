@@ -913,6 +913,22 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		"""
 		try:
 			import subprocess, re
+			
+			# Show stop commands in CMD terminal if available
+			if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'cmd_terms') and self.comm_console.cmd_terms:
+				cmd_term = self.comm_console.cmd_terms[0]  # Use first CMD terminal
+				if hasattr(cmd_term, 'input'):
+					# Send stop commands to CMD terminal
+					stop_commands = [
+						"adb root",
+						"adb shell pidof android_stress_tool",
+						"adb shell \"ps | grep android_stress_tool | grep -v grep\"",
+						"adb shell kill $(pidof android_stress_tool)"
+					]
+					for cmd in stop_commands:
+						cmd_term.input.setText(cmd)
+						cmd_term.input.returnPressed.emit()
+			
 			def _adb(args, **kw):
 				return subprocess.run(["adb", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5, **kw)
 			# Try to elevate
@@ -2085,6 +2101,24 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
 		print(f"[DEBUG] Stopping test for OS: {os_sel}")
 		
+		# Show appropriate console and switch protocol
+		try:
+			self.btn_uart_toggle.setChecked(True)
+			self.main_stack.setCurrentIndex(1)
+			if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'proto_combo'):
+				if os_sel == "AAOS":
+					# Switch to CMD protocol for AAOS
+					self.comm_console.proto_combo.setCurrentIndex(3)  # CMD
+					self.comm_console._on_proto_changed()
+					print("[DEBUG] Switched to CMD terminal for AAOS stop")
+				elif os_sel in ("Yocto", "Ubuntu"):
+					# Switch to UART protocol for Linux
+					self.comm_console.proto_combo.setCurrentIndex(0)  # UART
+					self.comm_console._on_proto_changed()
+					print("[DEBUG] Switched to UART console for Linux stop")
+		except Exception as e:
+			print(f"[DEBUG] Error switching console: {e}")
+		
 		# Mark this OS as not running
 		if hasattr(self, 'os_running_states'):
 			self.os_running_states[os_sel] = False
@@ -2098,13 +2132,28 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			self.end_time_epoch = None
 			self._stop_schedule_timer()
 		
-		# OS-specific cleanup
+		# OS-specific cleanup with UI feedback
 		try:
 			if os_sel == "AAOS":
 				print("[DEBUG] Stopping AAOS test")
+				# Add stop header to CMD terminal
+				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'cmd_terms') and self.comm_console.cmd_terms:
+					cmd_term = self.comm_console.cmd_terms[0]
+					if hasattr(cmd_term, 'input'):
+						cmd_term.input.setText("echo === Stopping AAOS Test ===")
+						cmd_term.input.returnPressed.emit()
+						cmd_term.input.setText("echo Sending stop commands...")
+						cmd_term.input.returnPressed.emit()
+						cmd_term.input.setText("echo ================================================")
+						cmd_term.input.returnPressed.emit()
 				self._kill_android_stress_tool_via_adb()
 			elif os_sel in ("Yocto", "Ubuntu"):
 				print("[DEBUG] Stopping Linux test")
+				# Add stop header to UART console
+				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log'):
+					self.comm_console.log.appendPlainText(f"\n=== Stopping {os_sel} Test ===")
+					self.comm_console.log.appendPlainText("Sending stop commands...")
+					self.comm_console.log.appendPlainText("=" * 50)
 				self._kill_stress_tool_via_uart()
 				# Add completion message to UART console
 				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log'):
