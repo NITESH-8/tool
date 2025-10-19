@@ -852,7 +852,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self.combo_target_os.addItems(["Yocto", "Ubuntu", "AAOS"])
 		self.combo_target_os.setToolTip("Select target OS")
 		self.combo_target_os.setMinimumWidth(120)
-		self.combo_target_os.currentTextChanged.connect(lambda t: setattr(self, 'selected_target_os', t))
+		self.combo_target_os.currentTextChanged.connect(self._on_os_changed)
 		self.selected_target_os = self.combo_target_os.currentText()
 		toolbar.addWidget(self.combo_target_os)
 		# Load Binary button between OS dropdown and Execute Test
@@ -2060,39 +2060,39 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self._stop_tail_file()
 
 	def _on_stop(self) -> None:
+		"""Stop the current test and reset button states."""
+		print("[DEBUG] Stop button clicked")
+		os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+		print(f"[DEBUG] Stopping test for OS: {os_sel}")
+		
 		self.is_running = False
 		self._stop_process()
 		self.end_time_epoch = None
+		
 		# Stop schedule timer
 		self._stop_schedule_timer()
-		# Re-enable inputs
-		self.btn_start.setEnabled(True)
-		self.btn_stop.setEnabled(False)
+		
+		# OS-specific cleanup
 		try:
-			if hasattr(self, 'action_execute'):
-				self.action_execute.setEnabled(True)
-			if hasattr(self, 'action_stop'):
-				self.action_stop.setEnabled(False)
-		except Exception:
-			pass
-		self.duration_spin.setEnabled(True)
-		# Stop internal sampler
-		# _sample_timer removed - using external backend
-		# No test mode
-		# Kill processes based on OS
-		try:
-			os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
 			if os_sel == "AAOS":
+				print("[DEBUG] Stopping AAOS test")
 				self._kill_android_stress_tool_via_adb()
 			elif os_sel in ("Yocto", "Ubuntu"):
+				print("[DEBUG] Stopping Linux test")
 				self._kill_stress_tool_via_uart()
-		except Exception:
-			pass
+		except Exception as e:
+			print(f"[DEBUG] Error during OS-specific cleanup: {e}")
+		
+		# Reset button states
+		self._reset_button_states()
 
 	def _on_process_finished(self) -> None:
+		"""Handle when a test process finishes naturally."""
+		print("[DEBUG] Test process finished naturally")
 		self.is_running = False
 		self._stop_process()
-		# _sample_timer removed - using external backend
+		# Reset button states when test completes
+		self._reset_button_states()
 
 	def _on_process_output(self) -> None:
 		now = get_timestamp()
@@ -2113,12 +2113,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Re-enable Execute if completion text is seen in AAOS status file stream
 		try:
 			if "Stress test completed" in getattr(self, '_raw_log_buffer', ''):
-				self.btn_start.setEnabled(True)
-				self.btn_stop.setEnabled(False)
-				if hasattr(self, 'action_execute'):
-					self.action_execute.setEnabled(True)
-				if hasattr(self, 'action_stop'):
-					self.action_stop.setEnabled(False)
+				print("[DEBUG] AAOS test completed naturally")
+				self._reset_button_states()
 		except Exception:
 			pass
 
@@ -2425,6 +2421,44 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		append_timer.start()
 		d.exec()
 
+	def _on_os_changed(self, new_os: str) -> None:
+		"""Handle OS dropdown changes - reset button states and stop any running processes."""
+		print(f"[DEBUG] OS changed to: {new_os}")
+		self.selected_target_os = new_os
+		
+		# If a test is currently running, stop it first
+		if self.is_running:
+			print("[DEBUG] Stopping current test due to OS change")
+			self._on_stop()
+		
+		# Reset button states to default
+		self._reset_button_states()
+
+	def _reset_button_states(self) -> None:
+		"""Reset all button states to their default (ready to start) state."""
+		print("[DEBUG] Resetting button states")
+		self.is_running = False
+		self.end_time_epoch = None
+		
+		# Reset buttons to default state
+		self.btn_start.setEnabled(True)
+		self.btn_stop.setEnabled(False)
+		
+		# Reset action states
+		try:
+			if hasattr(self, 'action_execute'):
+				self.action_execute.setEnabled(True)
+			if hasattr(self, 'action_stop'):
+				self.action_stop.setEnabled(False)
+		except Exception:
+			pass
+		
+		# Re-enable duration spin
+		self.duration_spin.setEnabled(True)
+		
+		# Stop any running timers
+		self._stop_schedule_timer()
+		self._stop_tail_file()
 
 	def _parse_stress_output(self, output: str) -> None:
 		"""Parse Linux stress tool output and update graph data."""
