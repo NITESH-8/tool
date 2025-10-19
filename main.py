@@ -964,14 +964,59 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			# Check if UART is connected and we have comm_console
 			if hasattr(self, 'comm_console') and self.comm_console.uart_connect_btn.isChecked():
 				# Send pkill command over UART
+				print("[DEBUG] Sending pkill stress_tool command over UART")
 				self.comm_console.send_commands([
 					"pkill stress_tool"
 				], spacing_ms=200)
-				print("Sent pkill stress_tool command over UART")
+				print("[DEBUG] pkill command sent successfully")
 			else:
-				print("UART not connected, cannot send pkill command")
+				print("[DEBUG] UART not connected, trying alternative stop method")
+				# Try alternative method to stop the process
+				self._kill_stress_tool_alternative()
+				# Show error message in UART console if available
+				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log'):
+					self.comm_console.log.appendPlainText("\n[WARNING] UART not connected - using alternative stop method")
 		except Exception as e:
-			print(f"Failed to send pkill command over UART: {e}")
+			print(f"[DEBUG] Failed to send pkill command over UART: {e}")
+			# Show error message in UART console if available
+			if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log'):
+				self.comm_console.log.appendPlainText(f"\n[ERROR] Failed to send stop command: {e}")
+
+	def _kill_stress_tool_alternative(self) -> None:
+		"""Alternative method to stop stress_tool when UART is not available."""
+		try:
+			import subprocess
+			import psutil
+			
+			print("[DEBUG] Trying alternative stop method...")
+			
+			# Try to find and kill stress_tool processes locally
+			killed_processes = []
+			for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+				try:
+					if proc.info['name'] and 'stress_tool' in proc.info['name'].lower():
+						print(f"[DEBUG] Found stress_tool process: PID {proc.info['pid']}")
+						proc.kill()
+						killed_processes.append(proc.info['pid'])
+				except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+					pass
+			
+			if killed_processes:
+				print(f"[DEBUG] Killed {len(killed_processes)} stress_tool processes: {killed_processes}")
+				# Show success message in UART console if available
+				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log'):
+					self.comm_console.log.appendPlainText(f"\n[SUCCESS] Killed {len(killed_processes)} stress_tool processes locally")
+			else:
+				print("[DEBUG] No stress_tool processes found to kill")
+				# Show info message in UART console if available
+				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log'):
+					self.comm_console.log.appendPlainText("\n[INFO] No stress_tool processes found to stop")
+					
+		except Exception as e:
+			print(f"[DEBUG] Alternative stop method failed: {e}")
+			# Show error message in UART console if available
+			if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log'):
+				self.comm_console.log.appendPlainText(f"\n[ERROR] Alternative stop method failed: {e}")
 
 	def _on_load_binary(self) -> None:
 		"""Auto-run UART workflow or AAOS ADB workflow based on target OS."""
@@ -2153,6 +2198,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				self._kill_android_stress_tool_via_adb()
 			elif os_sel in ("Yocto", "Ubuntu"):
 				print("[DEBUG] Stopping Linux test")
+				# Ensure UART is connected before sending stop command
+				self._ensure_uart_connected_for_stop()
 				# Just send the stop command directly without clearing or headers
 				self._kill_stress_tool_via_uart()
 		except Exception as e:
@@ -2160,6 +2207,31 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		
 		# Update button states for current OS
 		self._update_button_states_for_os(os_sel)
+
+	def _ensure_uart_connected_for_stop(self) -> None:
+		"""Ensure UART is connected before sending stop command."""
+		try:
+			# Check if UART is currently connected
+			uart_connected = bool(self.comm_console.uart_connect_btn.isChecked())
+			print(f"[DEBUG] UART currently connected: {uart_connected}")
+			
+			if not uart_connected:
+				print("[DEBUG] UART not connected, attempting to reconnect...")
+				# Try to find and connect to Linux port
+				linux_port = self.comm_console.find_linux_port("VID:PID=067B:23A3")
+				if linux_port:
+					print(f"[DEBUG] Found Linux port: {linux_port}")
+					connected = self.comm_console.connect_to_port(linux_port, baud=921600)
+					if connected:
+						print("[DEBUG] Successfully reconnected to UART")
+					else:
+						print("[DEBUG] Failed to reconnect to UART")
+				else:
+					print("[DEBUG] No Linux port found")
+			else:
+				print("[DEBUG] UART already connected")
+		except Exception as e:
+			print(f"[DEBUG] Error ensuring UART connection: {e}")
 
 	def _on_process_finished(self) -> None:
 		"""Handle when a test process finishes naturally."""
