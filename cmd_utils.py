@@ -194,28 +194,58 @@ class TerminalWidget(QtWidgets.QWidget):
 			if self._subproc.state() != QtCore.QProcess.Running:
 				return
 			
-			# Read all available data
-			data = self._subproc.readAllStandardOutput().data() + self._subproc.readAllStandardError().data()
-			if data:
+			# Read from both stdout and stderr separately to catch all output
+			stdout_data = self._subproc.readAllStandardOutput().data()
+			stderr_data = self._subproc.readAllStandardError().data()
+			
+			# Process stdout
+			if stdout_data:
 				try:
-					text = data.decode(errors='replace')
-					# Check if this looks like an Android shell prompt (for debugging if needed)
-					# if self._detect_android_prompt(text):
-					#     print(f"[DEBUG] Android prompt detected: {repr(text)}")
+					text = stdout_data.decode(errors='replace')
+					print(f"[DEBUG] ADB stdout received: {repr(text)}")
 					
-					# Ensure we display the text immediately
-					self.view.moveCursor(QtGui.QTextCursor.End)
-					self.view.insertPlainText(text)
-					self.view.moveCursor(QtGui.QTextCursor.End)
-					# Force the view to update immediately
-					self.view.repaint()
-				except Exception:
-					text = str(data)
+					# Check if this looks like an Android shell prompt
+					if self._detect_android_prompt(text):
+						print(f"[DEBUG] Android prompt detected in stdout: {repr(text)}")
+					
+					# Display the text immediately
 					self.view.moveCursor(QtGui.QTextCursor.End)
 					self.view.insertPlainText(text)
 					self.view.moveCursor(QtGui.QTextCursor.End)
 					self.view.repaint()
-		except Exception:
+				except Exception as e:
+					print(f"[DEBUG] Error decoding stdout: {e}")
+					text = str(stdout_data)
+					self.view.moveCursor(QtGui.QTextCursor.End)
+					self.view.insertPlainText(text)
+					self.view.moveCursor(QtGui.QTextCursor.End)
+					self.view.repaint()
+			
+			# Process stderr
+			if stderr_data:
+				try:
+					text = stderr_data.decode(errors='replace')
+					print(f"[DEBUG] ADB stderr received: {repr(text)}")
+					
+					# Check if this looks like an Android shell prompt
+					if self._detect_android_prompt(text):
+						print(f"[DEBUG] Android prompt detected in stderr: {repr(text)}")
+					
+					# Display the text immediately
+					self.view.moveCursor(QtGui.QTextCursor.End)
+					self.view.insertPlainText(text)
+					self.view.moveCursor(QtGui.QTextCursor.End)
+					self.view.repaint()
+				except Exception as e:
+					print(f"[DEBUG] Error decoding stderr: {e}")
+					text = str(stderr_data)
+					self.view.moveCursor(QtGui.QTextCursor.End)
+					self.view.insertPlainText(text)
+					self.view.moveCursor(QtGui.QTextCursor.End)
+					self.view.repaint()
+					
+		except Exception as e:
+			print(f"[DEBUG] Error in _on_sub_out: {e}")
 			pass
 
 	def _check_adb_output(self) -> None:
@@ -229,15 +259,22 @@ class TerminalWidget(QtWidgets.QWidget):
 		try:
 			if self._in_subsession and self._subproc is not None:
 				if self._subproc.state() == QtCore.QProcess.Running:
+					bytes_available = self._subproc.bytesAvailable()
+					can_read_line = self._subproc.canReadLine()
+					
+					if bytes_available > 0 or can_read_line:
+						print(f"[DEBUG] Timer check - bytes available: {bytes_available}, can read line: {can_read_line}")
+					
 					# Check if there's data available
-					if self._subproc.bytesAvailable() > 0:
+					if bytes_available > 0:
 						self._on_sub_out()
 					# Also try to read any pending data
-					if self._subproc.canReadLine():
+					if can_read_line:
 						self._on_sub_out()
 					# Force a repaint to ensure any buffered output is displayed
 					self.view.repaint()
-		except Exception:
+		except Exception as e:
+			print(f"[DEBUG] Error in _check_adb_output: {e}")
 			pass
 
 	def _end_subsession(self) -> None:
@@ -277,10 +314,17 @@ class TerminalWidget(QtWidgets.QWidget):
 			r'\$\s*$',              # Just $
 			r'root@[^:]+:/#\s*',    # root@device:/# (with content after)
 			r'[^@]+@[^:]+:/#\s*',   # user@device:/# (with content after)
+			r'root@[^:]+:/#',       # root@device:/# (anywhere in text)
+			r'[^@]+@[^:]+:/#',      # user@device:/# (anywhere in text)
+			r'^#\s*',               # # at start of line
+			r'^\$\s*',              # $ at start of line
+			r'#\s*$',               # # at end of line
+			r'\$\s*$',              # $ at end of line
 		]
 		
 		for pattern in prompt_patterns:
-			if re.search(pattern, text):
+			if re.search(pattern, text, re.MULTILINE):
+				print(f"[DEBUG] Prompt pattern matched: {pattern}")
 				return True
 		return False
 
@@ -318,6 +362,7 @@ class TerminalWidget(QtWidgets.QWidget):
 				parts = line.split()
 			
 			if parts and parts[0].lower() == "adb" and parts[-1].lower() == "shell":
+				print(f"[DEBUG] Starting ADB shell with args: {parts[1:]}")
 				self._subproc = QtCore.QProcess(self)
 				self._subproc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
 				self._subproc.readyReadStandardOutput.connect(self._on_sub_out)
@@ -326,23 +371,46 @@ class TerminalWidget(QtWidgets.QWidget):
 				
 				# Start adb shell exactly as typed (excluding the leading 'adb')
 				self._subproc.start("adb", parts[1:])
+				print(f"[DEBUG] ADB shell process started, state: {self._subproc.state()}")
 				
 				# Wait for the process to start
 				if not self._subproc.waitForStarted(3000):  # Wait up to 3 seconds
+					print("[DEBUG] Failed to start ADB shell process")
 					self.view.appendPlainText("[ERROR] Failed to start adb shell\n")
 					self._subproc = None
 					self.input.clear()
 					return
 				
+				print("[DEBUG] ADB shell process started successfully")
 				self._in_subsession = True
 				# Start the output checking timer with faster interval for better responsiveness
 				self._adb_output_timer.setInterval(50)  # Check every 50ms instead of 100ms
 				self._adb_output_timer.start()
 				self.view.appendPlainText("> " + " ".join(parts) + "\n[interactive adb shell - type 'exit' to return]\n")
+				
 				# Wait longer for the initial prompt to appear and force output reading
-				self._subproc.waitForReadyRead(2000)  # Wait up to 2 seconds
-				# Force immediate output reading to catch the initial prompt
-				self._on_sub_out()
+				print("[DEBUG] Waiting for initial ADB shell output...")
+				
+				# Try multiple approaches to get the initial prompt
+				for attempt in range(5):  # Try 5 times
+					print(f"[DEBUG] Attempt {attempt + 1} to read initial output...")
+					
+					# Wait for data to be available
+					if self._subproc.waitForReadyRead(1000):  # Wait 1 second each time
+						print(f"[DEBUG] Data ready, bytes available: {self._subproc.bytesAvailable()}")
+						self._on_sub_out()
+					else:
+						print(f"[DEBUG] No data ready on attempt {attempt + 1}")
+					
+					# Also try reading immediately without waiting
+					self._on_sub_out()
+					
+					# Check if we got any output
+					if self._subproc.bytesAvailable() == 0:
+						print(f"[DEBUG] No more data available after attempt {attempt + 1}")
+						break
+				
+				print("[DEBUG] Finished initial output reading attempts")
 				self.input.clear()
 				return
 			
