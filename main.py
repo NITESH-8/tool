@@ -862,6 +862,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self.btn_load_binary.setObjectName("btn_load")
 		self.btn_load_binary.clicked.connect(self._on_load_binary)
 		toolbar.addWidget(self.btn_load_binary)
+		
 		# Actions
 		a_start = QtGui.QAction("Execute Test", self)
 		a_start.triggered.connect(self._on_start)
@@ -2328,90 +2329,48 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Decide path based on target OS
 		os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
 		if os_sel in ("Yocto", "Ubuntu") and hasattr(self, 'comm_console'):
-			# Snapshot over UART - try capture mode first, fallback to regular commands
+			# Simple UART approach - send cat command and show result
 			text.setPlainText("Fetching latest status from device…")
-			print(f"[DEBUG] Opening log dialog for OS: {os_sel}")
 			
 			# Ensure connected; if not, try best-effort connect
 			connected = bool(self.comm_console.uart_connect_btn.isChecked())
-			print(f"[DEBUG] UART connected: {connected}")
-			
 			if not connected:
 				try:
 					linux_port = self.comm_console.find_linux_port("VID:PID=067B:23A3")
-					print(f"[DEBUG] Found Linux port: {linux_port}")
 					if linux_port:
 						connected = self.comm_console.connect_to_port(linux_port, baud=921600)
-						print(f"[DEBUG] Connection attempt result: {connected}")
 				except Exception as e:
-					print(f"[DEBUG] UART connect failed: {e}")
+					print(f"UART connect failed: {e}")
 					connected = False
 			
 			if not connected:
 				text.setPlainText("Failed to connect to Linux UART.")
-				print("[DEBUG] No UART connection available")
 			else:
-				print("[DEBUG] UART connected, attempting to fetch log")
-				# Try capture mode if available, otherwise fallback to regular commands
-				if hasattr(self.comm_console, 'start_capture'):
-					print("[DEBUG] Using capture mode")
-					# Use capture mode (clean, no console pollution)
-					end_token = f"__END_OF_STATUS__{int(time.time()*1000)}__"
-					def _done(payload: str) -> None:
-						try:
-							print(f"[DEBUG] Capture completed, got {len(payload)} chars")
-							print(f"[DEBUG] Captured content: {repr(payload[:200])}...")
-							text.setPlainText(payload)
-							text.moveCursor(QtGui.QTextCursor.End)
-						except Exception as e:
-							print(f"[DEBUG] Capture callback failed: {e}")
-							text.setPlainText(f"Error displaying captured data: {e}")
+				# Simple approach: send cat command and extract result from console
+				def _show_result():
 					try:
-						print(f"[DEBUG] Starting capture with token: {end_token}")
-						self.comm_console.start_capture(end_token=end_token, timeout_ms=10000, on_complete=_done)
-						self.comm_console.send_commands_silent([
-							f"cat /stress_tools/stress_tool_status.txt; echo {end_token}",
-						], spacing_ms=200)
-						print("[DEBUG] Commands sent silently")
+						port = self.comm_console.uart_port_combo.currentText()
+						console_text = self.comm_console._port_logs.get(port, "")
+						
+						# Find the last cat command output
+						lines = console_text.split('\n')
+						start_idx = -1
+						for i, line in enumerate(lines):
+							if 'cat /stress_tools/stress_tool_status.txt' in line:
+								start_idx = i + 1
+						if start_idx >= 0 and start_idx < len(lines):
+							file_content = '\n'.join(lines[start_idx:])
+							text.setPlainText(file_content)
+						else:
+							text.setPlainText("No status data found in console output")
 					except Exception as e:
-						print(f"[DEBUG] UART capture failed: {e}")
-						text.setPlainText(f"Failed to fetch status log over UART: {e}")
-				else:
-					print("[DEBUG] Using fallback method")
-					# Fallback: use regular commands (will show in console but work)
-					text.setPlainText("Using fallback method - commands will appear in console...")
-					def _show_result():
-						# Get the current console content and extract the file content
-						try:
-							port = self.comm_console.uart_port_combo.currentText()
-							console_text = self.comm_console._port_logs.get(port, "")
-							print(f"[DEBUG] Console text length: {len(console_text)}")
-							print(f"[DEBUG] Console text preview: {repr(console_text[-500:])}")
-							
-							# Find the last cat command output (simple heuristic)
-							lines = console_text.split('\n')
-							start_idx = -1
-							for i, line in enumerate(lines):
-								if 'cat /stress_tools/stress_tool_status.txt' in line:
-									start_idx = i + 1
-									print(f"[DEBUG] Found cat command at line {i}, content starts at line {start_idx}")
-							if start_idx >= 0 and start_idx < len(lines):
-								file_content = '\n'.join(lines[start_idx:])
-								print(f"[DEBUG] Extracted file content length: {len(file_content)}")
-								print(f"[DEBUG] File content preview: {repr(file_content[:200])}")
-								text.setPlainText(file_content)
-							else:
-								print("[DEBUG] No cat command found in console output")
-								text.setPlainText("No status data found in console output")
-						except Exception as e:
-							print(f"[DEBUG] Error parsing console output: {e}")
-							text.setPlainText(f"Error parsing console output: {e}")
-					
-					# Send the command and wait a bit for response
-					print("[DEBUG] Sending cat command via UART")
-					self.comm_console.send_commands([
-						"cat /stress_tools/stress_tool_status.txt",
-					], spacing_ms=500, on_complete=_show_result)
+						text.setPlainText(f"Error parsing console output: {e}")
+				
+				# Send the command (will show in console)
+				self.comm_console.send_commands([
+					"cat /stress_tools/stress_tool_status.txt",
+				], spacing_ms=500, on_complete=_show_result)
+			
 			# No live timer for UART snapshot; close dialog to fetch again later
 			d.exec()
 			return
@@ -2465,6 +2424,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		append_timer.timeout.connect(_pump)
 		append_timer.start()
 		d.exec()
+
 
 	def _parse_stress_output(self, output: str) -> None:
 		"""Parse Linux stress tool output and update graph data."""
