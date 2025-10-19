@@ -2112,10 +2112,14 @@ class PerformanceApp(QtWidgets.QMainWindow):
 					self.comm_console._on_proto_changed()
 					print("[DEBUG] Switched to CMD terminal for AAOS stop")
 				elif os_sel in ("Yocto", "Ubuntu"):
-					# Switch to UART protocol for Linux
-					self.comm_console.proto_combo.setCurrentIndex(0)  # UART
-					self.comm_console._on_proto_changed()
-					print("[DEBUG] Switched to UART console for Linux stop")
+					# For Linux, only switch to UART if not already there
+					current_proto = self.comm_console.proto_combo.currentIndex()
+					if current_proto != 0:
+						self.comm_console.proto_combo.setCurrentIndex(0)  # UART
+						self.comm_console._on_proto_changed()
+						print("[DEBUG] Switched to UART console for Linux stop")
+					else:
+						print("[DEBUG] Already on UART console, no switching needed")
 		except Exception as e:
 			print(f"[DEBUG] Error switching console: {e}")
 		
@@ -2149,16 +2153,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				self._kill_android_stress_tool_via_adb()
 			elif os_sel in ("Yocto", "Ubuntu"):
 				print("[DEBUG] Stopping Linux test")
-				# Add stop header to UART console
-				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log'):
-					self.comm_console.log.appendPlainText(f"\n=== Stopping {os_sel} Test ===")
-					self.comm_console.log.appendPlainText("Sending stop commands...")
-					self.comm_console.log.appendPlainText("=" * 50)
+				# Just send the stop command directly without clearing or headers
 				self._kill_stress_tool_via_uart()
-				# Add completion message to UART console
-				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'log'):
-					self.comm_console.log.appendPlainText(f"\n=== {os_sel} Test Stopped ===")
-					self.comm_console.log.appendPlainText("=" * 50)
 		except Exception as e:
 			print(f"[DEBUG] Error during OS-specific cleanup: {e}")
 		
