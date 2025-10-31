@@ -8,7 +8,7 @@ and stress testing capabilities.
 Key Features:
 - Real-time performance monitoring with live graphs
 - Per-core CPU utilization tracking
-- GPU monitoring via NVIDIA NVML
+- GPU monitoring via external stress tools
 - DRAM usage monitoring
 - Stress testing with external tools
 - Data export (CSV, PNG)
@@ -18,7 +18,7 @@ Key Features:
 
 Author: Performance GUI Team
 Version: 1.0
-Dependencies: PySide6, pyqtgraph, pynvml, pyserial
+Dependencies: PySide6, pyqtgraph, pyserial
 """
 
 from __future__ import annotations
@@ -37,14 +37,14 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 # Local module imports
-from .data_sources import Subsystem, get_timestamp
-from .adb_utils import (
+from data_sources import Subsystem, get_timestamp
+from adb_utils import (
 	is_adb_available as _adb_available,
 	list_devices as _adb_list_devices,
 	wait_for_device as _adb_wait_for_device,
 	shell as _adb_shell,
 )
-from .comm_console import CommConsole
+from comm_console import CommConsole
 
 
 class TimeAxis(pg.AxisItem):
@@ -245,7 +245,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 	Key Features:
 	- Real-time performance monitoring with live graphs
 	- Per-core CPU utilization tracking
-	- GPU monitoring via NVIDIA NVML
+	- GPU monitoring via external stress tools
 	- DRAM usage monitoring
 	- External stress tool integration
 	- Data export (CSV, PNG)
@@ -1151,7 +1151,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				# Look for number in response
 				m = re.search(r"(\d+)", resp)
 				if m:
-					val = max(1, min(128, int(m.group(1))))
+					# Use the exact reported core count from nproc without an artificial upper cap
+					val = max(1, int(m.group(1)))
 					old_count = getattr(self, 'core_count', 0)
 					if val != old_count:
 						self.core_count = val
@@ -1993,6 +1994,17 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			QtWidgets.QMessageBox.critical(self, "UART Connect Failed", f"Failed to open {linux_port} at 921600.")
 			self._on_stop()
 			return
+		# For Yocto/Ubuntu, add header message first before switching protocols
+		os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+		if os_sel in ("Yocto", "Ubuntu"):
+			# Add header message without clearing UART console history
+			if hasattr(self.comm_console, 'log'):
+				self.comm_console.log.appendPlainText(f"\n=== Starting {os_sel} Test ===")
+				self.comm_console.log.appendPlainText(f"Command: {cmd_line}")
+				self.comm_console.log.appendPlainText("=" * 50)
+				# Ensure cursor is at the end for smooth scrolling
+				self.comm_console.log.moveCursor(QtGui.QTextCursor.End)
+		
 		try:
 			self.btn_uart_toggle.setChecked(True)
 			self.main_stack.setCurrentIndex(1)
@@ -2006,15 +2018,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			QtWidgets.QMessageBox.warning(self, "No Command", "Generated command is empty.")
 		else:
 			# For Yocto/Ubuntu, show commands in UART console
-			os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
 			if os_sel in ("Yocto", "Ubuntu"):
-				# Add header message without clearing UART console history
-				if hasattr(self.comm_console, 'log'):
-					self.comm_console.log.appendPlainText(f"\n=== Starting {os_sel} Test ===")
-					self.comm_console.log.appendPlainText(f"Command: {cmd_line}")
-					self.comm_console.log.appendPlainText("=" * 50)
-					# Ensure cursor is at the end for smooth scrolling
-					self.comm_console.log.moveCursor(QtGui.QTextCursor.End)
 				
 				self.comm_console.send_commands([
 					"cd /",
