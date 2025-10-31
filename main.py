@@ -1139,6 +1139,11 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				ser = serial.Serial(port=port, baudrate=921600, timeout=3, write_timeout=2)
 				print(f"[DEBUG] Connected to {port}, sending nproc command...")
 				
+				# Clear any pending bytes to avoid mixing old output
+				try:
+					ser.reset_input_buffer()
+				except Exception:
+					pass
 				# Send nproc command
 				ser.write(b"nproc\n")
 				ser.flush()  # Ensure command is sent
@@ -1148,11 +1153,19 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				resp = ser.read(256).decode(errors='ignore')
 				print(f"[DEBUG] nproc response: {repr(resp)}")
 				
-				# Look for number in response
-				m = re.search(r"(\d+)", resp)
-				if m:
-					# Use the exact reported core count from nproc without an artificial upper cap
-					val = max(1, int(m.group(1)))
+				# Look for a line that is purely a number (avoid timestamps/prompts)
+				val: Optional[int] = None
+				for line in resp.splitlines():
+					if re.fullmatch(r"\s*\d+\s*", line or ""):
+						try:
+							val_candidate = int(line.strip())
+							# Cap core count to a maximum of 6 as requested
+							if 1 <= val_candidate <= 10:
+								val = val_candidate
+								break
+						except Exception:
+							pass
+				if val is not None:
 					old_count = getattr(self, 'core_count', 0)
 					if val != old_count:
 						self.core_count = val
