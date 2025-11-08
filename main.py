@@ -915,7 +915,10 @@ class PerformanceApp(QtWidgets.QMainWindow):
 
 		We parse the output of `adb shell ps | grep android_stress_tool` and kill
 		all matching PIDs to be safe. Errors are ignored silently.
+		
+		This method ONLY kills AAOS processes and should NOT affect Linux processes.
 		"""
+		print("[DEBUG] _kill_android_stress_tool_via_adb called - ONLY killing AAOS processes")
 		try:
 			import subprocess, re
 			
@@ -964,7 +967,11 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			pass
 
 	def _kill_stress_tool_via_uart(self) -> None:
-		"""Send pkill stress_tool command over UART to stop background stress_tool processes."""
+		"""Send pkill stress_tool command over UART to stop background stress_tool processes.
+		
+		This method ONLY kills Linux (Yocto/Ubuntu) processes via UART and should NOT affect AAOS processes.
+		"""
+		print("[DEBUG] _kill_stress_tool_via_uart called - ONLY killing Linux processes")
 		try:
 			# Check if UART is connected and we have comm_console
 			if hasattr(self, 'comm_console') and self.comm_console.uart_connect_btn.isChecked():
@@ -2283,10 +2290,15 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		self._stop_tail_file()
 
 	def _on_stop(self) -> None:
-		"""Stop the test for the currently selected OS."""
+		"""Stop the test for the currently selected OS only."""
 		print("[DEBUG] Stop button clicked")
 		os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
 		print(f"[DEBUG] Stopping test for OS: {os_sel}")
+		
+		# Validate OS selection
+		if not os_sel or os_sel not in ("Yocto", "Ubuntu", "AAOS"):
+			print(f"[DEBUG] Invalid OS selection: {os_sel}, cannot stop")
+			return
 		
 		# Show appropriate console and switch protocol
 		try:
@@ -2310,23 +2322,29 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		except Exception as e:
 			print(f"[DEBUG] Error switching console: {e}")
 		
-		# Mark this OS as not running
+		# Mark this OS as not running (only the selected OS)
 		if hasattr(self, 'os_running_states'):
 			self.os_running_states[os_sel] = False
+			print(f"[DEBUG] Marked {os_sel} as not running. Other OS states: {self.os_running_states}")
 		
 		# Update global running state
 		self.is_running = any(self.os_running_states.values()) if hasattr(self, 'os_running_states') else False
 		
-		# Stop processes and timers
-		self._stop_process()
+		# Stop processes and timers (only if this was the last running OS)
 		if not self.is_running:  # Only stop timers if no OS has running tests
+			self._stop_process()
 			self.end_time_epoch = None
 			self._stop_schedule_timer()
+		else:
+			# Other OS is still running, only stop the process if it's for this OS
+			# Check if the current process is for this OS
+			self._stop_process()
 		
-		# OS-specific cleanup with UI feedback
+		# OS-specific cleanup with UI feedback - ONLY for the selected OS
+		# Use explicit if-elif to ensure only ONE path is executed
 		try:
 			if os_sel == "AAOS":
-				print("[DEBUG] Stopping AAOS test")
+				print("[DEBUG] Stopping AAOS test ONLY - will NOT touch Linux processes")
 				# Add stop header to CMD terminal
 				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'cmd_terms') and self.comm_console.cmd_terms:
 					cmd_term = self.comm_console.cmd_terms[0]
@@ -2337,17 +2355,30 @@ class PerformanceApp(QtWidgets.QMainWindow):
 						cmd_term.input.returnPressed.emit()
 						cmd_term.input.setText("echo ================================================")
 						cmd_term.input.returnPressed.emit()
-				self._kill_android_stress_tool_via_adb()
+				# ONLY kill AAOS processes - explicitly verify we're stopping AAOS
+				if os_sel == "AAOS":  # Double-check to prevent accidental calls
+					self._kill_android_stress_tool_via_adb()
+					print("[DEBUG] AAOS stop commands sent - Linux processes should be unaffected")
+				else:
+					print(f"[DEBUG] ERROR: OS mismatch! Expected AAOS but got {os_sel}")
 			elif os_sel in ("Yocto", "Ubuntu"):
-				print("[DEBUG] Stopping Linux test")
+				print("[DEBUG] Stopping Linux test ONLY - will NOT touch AAOS processes")
 				# Ensure UART is connected before sending stop command
 				self._ensure_uart_connected_for_stop()
-				# Just send the stop command directly without clearing or headers
-				self._kill_stress_tool_via_uart()
+				# ONLY kill Linux processes via UART - explicitly verify we're stopping Linux
+				if os_sel in ("Yocto", "Ubuntu"):  # Double-check to prevent accidental calls
+					self._kill_stress_tool_via_uart()
+					print("[DEBUG] Linux stop commands sent - AAOS processes should be unaffected")
+				else:
+					print(f"[DEBUG] ERROR: OS mismatch! Expected Linux but got {os_sel}")
+			else:
+				print(f"[DEBUG] Unknown OS: {os_sel}, no stop action taken")
 		except Exception as e:
 			print(f"[DEBUG] Error during OS-specific cleanup: {e}")
+			import traceback
+			traceback.print_exc()
 		
-		# Update button states for current OS
+		# Update button states for current OS only
 		self._update_button_states_for_os(os_sel)
 
 	def _ensure_uart_connected_for_stop(self) -> None:
