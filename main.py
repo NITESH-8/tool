@@ -396,6 +396,11 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# This provides a reasonable fallback for most systems
 		self.core_count = 7
 		
+		# Store core counts separately for each OS
+		# These are updated when Load Binary is clicked for each OS
+		self.core_count_linux = 7  # Default for Yocto/Ubuntu
+		self.core_count_aaos = 5   # Default for AAOS
+		
 		# Create CoreState objects for each core
 		# Each core gets its own state object for independent monitoring
 		self.core_states = {i: CoreState(core_id=i) for i in range(self.core_count)}
@@ -1179,12 +1184,19 @@ class PerformanceApp(QtWidgets.QMainWindow):
 						except Exception:
 							pass
 				if val is not None:
-					old_count = getattr(self, 'core_count', 0)
+					old_count = getattr(self, 'core_count_linux', 7)
 					if val != old_count:
-						self.core_count = val
-						print(f"[DEBUG] Updated core count from {old_count} to {val}")
+						self.core_count_linux = val
+						print(f"[DEBUG] Updated Linux core count from {old_count} to {val}")
+						# Update current core_count if Linux OS is selected
+						os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+						if os_sel in ("Yocto", "Ubuntu"):
+							self.core_count = val
+							# Rebuild core states for the new count
+							self.core_states = {i: CoreState(core_id=i) for i in range(self.core_count)}
+							print(f"[DEBUG] Updated current core_count to {val} (Linux selected)")
 					else:
-						print(f"[DEBUG] Core count already set to {val}")
+						print(f"[DEBUG] Linux core count already set to {val}")
 				else:
 					print(f"[DEBUG] No number found in nproc response: {resp}")
 					
@@ -1278,10 +1290,17 @@ class PerformanceApp(QtWidgets.QMainWindow):
 							pass
 				
 				if val is not None:
-					old_count = getattr(self, 'core_count', 0)
+					old_count = getattr(self, 'core_count_aaos', 5)
 					if val != old_count:
-						self.core_count = val
+						self.core_count_aaos = val
 						print(f"[DEBUG] Updated AAOS core count from {old_count} to {val}")
+						# Update current core_count if AAOS is selected
+						os_sel = getattr(self, 'selected_target_os', None) or (self.combo_target_os.currentText() if hasattr(self, 'combo_target_os') else "")
+						if os_sel == "AAOS":
+							self.core_count = val
+							# Rebuild core states for the new count
+							self.core_states = {i: CoreState(core_id=i) for i in range(self.core_count)}
+							print(f"[DEBUG] Updated current core_count to {val} (AAOS selected)")
 					else:
 						print(f"[DEBUG] AAOS core count already set to {val}")
 				else:
@@ -2140,13 +2159,13 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				
 				self.comm_console.send_commands([
 					"cd /",
-					"cd stress_tools", 
+					"cd /tmp/stress_tools", 
 					cmd_line,
 				], spacing_ms=400)
 			else:
 				self.comm_console.send_commands([
 					"cd /",
-					"cd stress_tools",
+					"cd /tmp/stress_tools",
 					cmd_line,
 				], spacing_ms=400)
 		# _sample_timer removed - using external backend
@@ -2720,6 +2739,30 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Initialize OS running states if not exists
 		if not hasattr(self, 'os_running_states'):
 			self.os_running_states = {"Yocto": False, "Ubuntu": False, "AAOS": False}
+		
+		# Update core count based on selected OS
+		if new_os in ("Yocto", "Ubuntu"):
+			# Use Linux core count
+			new_core_count = getattr(self, 'core_count_linux', 7)
+			if self.core_count != new_core_count:
+				print(f"[DEBUG] Switching to Linux core count: {new_core_count}")
+				self.core_count = new_core_count
+				# Rebuild core states for the new count
+				self.core_states = {i: CoreState(core_id=i) for i in range(self.core_count)}
+				# Rebuild UI
+				self._rebuild_core_ui()
+				self._rebuild_active_combo()
+		elif new_os == "AAOS":
+			# Use AAOS core count
+			new_core_count = getattr(self, 'core_count_aaos', 5)
+			if self.core_count != new_core_count:
+				print(f"[DEBUG] Switching to AAOS core count: {new_core_count}")
+				self.core_count = new_core_count
+				# Rebuild core states for the new count
+				self.core_states = {i: CoreState(core_id=i) for i in range(self.core_count)}
+				# Rebuild UI
+				self._rebuild_core_ui()
+				self._rebuild_active_combo()
 		
 		# Update button states based on the selected OS
 		self._update_button_states_for_os(new_os)
