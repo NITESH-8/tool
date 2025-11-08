@@ -37,7 +37,7 @@ import platform
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from .adb_utils import (
+from adb_utils import (
 	is_adb_available, 
 	list_devices as adb_list_devices, 
 	shell as adb_shell, 
@@ -53,7 +53,7 @@ from .adb_utils import (
 	get_device_model,
 	get_device_android_version
 )
-from .cmd_utils import TerminalWidget
+from cmd_utils import TerminalWidget
 
 
 class CommConsole(QtWidgets.QWidget):
@@ -236,7 +236,7 @@ class CommConsole(QtWidgets.QWidget):
 	def _setup_uart(self) -> None:
 		self._serial = None  # type: ignore[assignment]
 		self._poll = QtCore.QTimer(self)
-		self._poll.setInterval(100)
+		self._poll.setInterval(50)  # Reduced from 100ms to 50ms for faster response with long outputs
 		self._poll.timeout.connect(self._poll_uart)
 		# Per-port log buffers and current port pointer
 		self._port_logs = {}  # type: ignore[var-annotated]
@@ -764,18 +764,38 @@ class CommConsole(QtWidgets.QWidget):
 
 	def _poll_uart(self) -> None:
 		try:
-			if self._serial is not None and self._serial.in_waiting:
-				data = self._serial.read(self._serial.in_waiting)
-				if data:
-					try:
-						text = data.decode(errors="replace")
-					except Exception:
-						text = str(data)
+			if self._serial is not None:
+				# Read all available data in a loop to handle long outputs
+				# This ensures we capture all data even if it arrives faster than polling
+				max_reads_per_poll = 100  # Prevent infinite loop
+				read_count = 0
+				total_text = ""
+				
+				while self._serial.in_waiting > 0 and read_count < max_reads_per_poll:
+					# Read available bytes (up to 64KB per read to handle large outputs)
+					bytes_to_read = min(self._serial.in_waiting, 65536)
+					data = self._serial.read(bytes_to_read)
+					if data:
+						try:
+							text = data.decode(errors="replace")
+							total_text += text
+						except Exception:
+							text = str(data)
+							total_text += text
+					read_count += 1
+					
+					# Small delay to allow more data to arrive if streaming
+					if self._serial.in_waiting > 0 and read_count < max_reads_per_poll:
+						import time
+						time.sleep(0.001)  # 1ms delay to allow buffer to fill
+				
+				# Update UI with all collected text at once (more efficient)
+				if total_text:
 					port = self.uart_port_combo.currentText()
-					self._port_logs[port] = self._port_logs.get(port, "") + text
+					self._port_logs[port] = self._port_logs.get(port, "") + total_text
 					if hasattr(self, 'log'):
 						self.log.moveCursor(QtGui.QTextCursor.End)
-						self.log.insertPlainText(text)
+						self.log.insertPlainText(total_text)
 						self.log.moveCursor(QtGui.QTextCursor.End)
 		except Exception as e:
 			self._poll.stop()
