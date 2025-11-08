@@ -1064,6 +1064,19 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		If a device is connected, the commands are prefixed with -s <first-serial>.
 		"""
 		try:
+			print("[DEBUG] Using ADB workflow for AAOS")
+			# Step 1: Update core count from AAOS device
+			print("[DEBUG] Step 1: Updating core count from AAOS")
+			self._update_core_count_from_aaos()
+			
+			# Step 2: Rebuild core UI and active-graph list
+			print("[DEBUG] Step 2: Rebuilding core UI")
+			self._rebuild_core_ui()
+			print("[DEBUG] Step 3: Rebuilding active combo")
+			self._rebuild_active_combo()
+			
+			# Step 4: Load binary via ADB
+			print("[DEBUG] Step 4: Loading binary via ADB")
 			# Discover first connected device (optional)
 			serial = None
 			try:
@@ -1186,6 +1199,98 @@ class PerformanceApp(QtWidgets.QMainWindow):
 					print(f"[DEBUG] Error closing UART: {e}")
 		except Exception as e:
 			print(f"[DEBUG] Core count detection failed: {e}")
+
+	def _update_core_count_from_aaos(self) -> None:
+		"""Query AAOS device via ADB for number of cores using /proc/cpuinfo and update UI state.
+
+		Commands executed:
+		  adb shell
+		  cat /proc/cpuinfo | grep ^processor |wc -l
+		Falls back to existing core_count on failure.
+		"""
+		try:
+			# Discover first connected device
+			serial = None
+			try:
+				devs = _adb_list_devices()
+				if devs:
+					serial = devs[0][0]
+					print(f"[DEBUG] Using ADB device: {serial}")
+				else:
+					print("[DEBUG] No ADB devices found")
+					return
+			except Exception as e:
+				print(f"[DEBUG] Failed to list ADB devices: {e}")
+				return
+			
+			# Send commands to CMD terminal for visibility
+			try:
+				# Show console and switch to CMD protocol if available
+				if hasattr(self, 'comm_console') and hasattr(self.comm_console, 'cmd_terms') and self.comm_console.cmd_terms:
+					term = self.comm_console.cmd_terms[0]
+					if term and hasattr(term, 'input') and hasattr(term, '_send'):
+						# Prepare commands
+						if serial:
+							cmd1 = f"adb -s {serial} shell"
+							cmd2 = f"adb -s {serial} shell \"cat /proc/cpuinfo | grep ^processor |wc -l\""
+						else:
+							cmd1 = "adb shell"
+							cmd2 = "adb shell \"cat /proc/cpuinfo | grep ^processor |wc -l\""
+						
+						# Send both commands to CMD terminal for visibility
+						term.input.setText(cmd1)
+						term._send()
+						time.sleep(0.3)  # Brief pause
+						term.input.setText(cmd2)
+						term._send()
+			except Exception as e:
+				print(f"[DEBUG] Failed to send commands to CMD terminal: {e}")
+			
+			# Execute command via ADB shell to get the result
+			try:
+				command = "cat /proc/cpuinfo | grep ^processor |wc -l"
+				print(f"[DEBUG] Executing ADB command: {command}")
+				code, stdout, stderr = _adb_shell(serial, command, timeout=10)
+				
+				if code != 0:
+					print(f"[DEBUG] ADB command failed with code {code}: {stderr}")
+					return
+				
+				print(f"[DEBUG] ADB command response: stdout={repr(stdout)}, stderr={repr(stderr)}")
+				
+				# Parse the output - should be a number
+				val: Optional[int] = None
+				output = (stdout or stderr).strip()
+				
+				# Look for a number in the output
+				import re
+				for line in output.splitlines():
+					line = line.strip()
+					# Match lines that are purely a number
+					if re.fullmatch(r"\s*\d+\s*", line):
+						try:
+							val_candidate = int(line.strip())
+							# Cap core count to a reasonable range
+							if 1 <= val_candidate <= 32:
+								val = val_candidate
+								break
+						except Exception:
+							pass
+				
+				if val is not None:
+					old_count = getattr(self, 'core_count', 0)
+					if val != old_count:
+						self.core_count = val
+						print(f"[DEBUG] Updated AAOS core count from {old_count} to {val}")
+					else:
+						print(f"[DEBUG] AAOS core count already set to {val}")
+				else:
+					print(f"[DEBUG] No valid number found in ADB response: {output}")
+					
+			except Exception as e:
+				print(f"[DEBUG] ADB communication error: {e}")
+		except Exception as e:
+			print(f"[DEBUG] AAOS core count detection failed: {e}")
 
 	def _rebuild_core_ui(self) -> None:
 		"""Recreate CPU cores UI based on self.core_count."""
@@ -1331,15 +1436,15 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			"sudo su",
 			"nvidia",
 			"cd /",
-			"mkdir -p /mnt/usb",
-			"mkdir -p /stress_tools",
+			"mkdir -p /tmp/usb",
+			"mkdir -p /tmp/stress_tools",
 			"DEV=\"$(lsblk -rpno NAME,TYPE,TRAN | awk '$2==\"disk\" && $3==\"usb\"{print $1; exit}')\"",
 			"if [ -z \"$DEV\" ]; then DEV=\"$(lsblk -rpno NAME,TYPE,RM | awk '$2==\"disk\" && $3==\"1\"{print $1; exit}')\"; fi",
 			"PART=\"$(lsblk -rpno NAME,TYPE \"$DEV\" | awk '$2==\"part\"{print $1; exit}')\"",
 			"if [ -z \"$PART\" ]; then PART=\"$(lsblk -rpno NAME,TYPE | awk '$2==\"part\"{print $1; exit}')\"; fi",
-			"mount \"$PART\" /mnt/usb || (sleep 1; mount \"$PART\" /mnt/usb)",
-			"cp /mnt/usb/stress_tool /stress_tools/",
-			"umount /mnt/usb",
+			"mount \"$PART\" /tmp/usb || (sleep 1; mount \"$PART\" /tmp/usb)",
+			"cp /tmp/usb/stress_tool /tmp/stress_tools/",
+			"umount /tmp/usb",
 			"cd /",
 		]
 		def _on_done() -> None:
@@ -2538,7 +2643,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 						lines = console_text.split('\n')
 						start_idx = -1
 						for i, line in enumerate(lines):
-							if 'cat /stress_tools/stress_tool_status.txt' in line:
+							if 'cat /tmp/stress_tools/stress_tool_status.txt' in line:
 								start_idx = i + 1
 						if start_idx >= 0 and start_idx < len(lines):
 							file_content = '\n'.join(lines[start_idx:])
@@ -2550,7 +2655,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 				
 				# Send the command (will show in console)
 				self.comm_console.send_commands([
-					"cat /stress_tools/stress_tool_status.txt",
+					"cat /tmp/stress_tools/stress_tool_status.txt",
 				], spacing_ms=500, on_complete=_show_result)
 			
 			# No live timer for UART snapshot; close dialog to fetch again later
@@ -2618,6 +2723,9 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		
 		# Update button states based on the selected OS
 		self._update_button_states_for_os(new_os)
+		
+		# Update command preview immediately when OS changes
+		self._update_command_preview()
 
 	def _update_button_states_for_os(self, os_name: str) -> None:
 		"""Update button states based on whether the selected OS has a running test."""
