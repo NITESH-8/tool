@@ -155,6 +155,12 @@ class CommConsole(QtWidgets.QWidget):
 		self.uart_clear_btn.setToolTip("Clear only this port's session")
 		self.uart_clear_btn.clicked.connect(self._on_uart_clear)
 		u.addWidget(self.uart_clear_btn)
+		# Stop button to interrupt running commands (Ctrl+C)
+		self.uart_stop_btn = QtWidgets.QPushButton("Stop")
+		self.uart_stop_btn.setToolTip("Stop/interrupt running command (Ctrl+C)")
+		self.uart_stop_btn.clicked.connect(self._on_uart_stop)
+		self.uart_stop_btn.setEnabled(False)  # Disabled until connected
+		u.addWidget(self.uart_stop_btn)
 		self.uart_connect_btn = QtWidgets.QPushButton("Connect")
 		self.uart_connect_btn.setCheckable(True)
 		self.uart_connect_btn.toggled.connect(self._on_uart_connect_toggle)
@@ -278,6 +284,9 @@ class CommConsole(QtWidgets.QWidget):
 			print(f"[DEBUG] Switching to non-UART protocol")
 			self._uart_disconnect_if_needed()
 			self._reset_uart_controls(clear_ports=False)
+			# Disable Stop button when not on UART protocol
+			if hasattr(self, 'uart_stop_btn'):
+				self.uart_stop_btn.setEnabled(False)
 		else:
 			print(f"[DEBUG] Switching to UART protocol")
 			# Selected UART: reset and repopulate fresh
@@ -286,6 +295,9 @@ class CommConsole(QtWidgets.QWidget):
 			port = self.uart_port_combo.currentText()
 			print(f"[DEBUG] Calling _on_port_changed with port: {port}")
 			self._on_port_changed(port)
+			# Update Stop button state based on connection status
+			if hasattr(self, 'uart_stop_btn'):
+				self.uart_stop_btn.setEnabled(self._serial is not None and hasattr(self._serial, 'is_open') and self._serial.is_open)
 		# When switching to ADB, refresh device list (no host prompt)
 		if idx == 2:
 			self._refresh_adb_devices()
@@ -601,6 +613,7 @@ class CommConsole(QtWidgets.QWidget):
 				xonxoff = (rx == "XON/XOFF")
 				self._serial = serial.Serial(port=port, baudrate=baud, bytesize=bytesize, parity=parity, stopbits=stopbits, rtscts=rtscts, xonxoff=xonxoff, timeout=0)
 				self.uart_connect_btn.setText("Disconnect")
+				self.uart_stop_btn.setEnabled(True)  # Enable Stop button when connected
 				self._poll.start()
 				self._current_port = port
 				self._port_logs.setdefault(port, "")
@@ -632,6 +645,7 @@ class CommConsole(QtWidgets.QWidget):
 			except Exception:
 				pass
 			self.uart_connect_btn.setText("Connect")
+			self.uart_stop_btn.setEnabled(False)  # Disable Stop button when disconnected
 
 	def _on_uart_clear(self) -> None:
 		try:
@@ -641,6 +655,23 @@ class CommConsole(QtWidgets.QWidget):
 				self.log.clear()
 		except Exception:
 			pass
+
+	def _on_uart_stop(self) -> None:
+		"""Send Ctrl+C (interrupt signal) to stop/interrupt a running command."""
+		try:
+			if self._serial is not None and self._serial.is_open:
+				# Send Ctrl+C (ASCII code 3, interrupt signal)
+				self._serial.write(b'\x03')
+				# Also send a newline to ensure the interrupt is processed
+				self._serial.write(b'\n')
+				port = self.uart_port_combo.currentText()
+				if hasattr(self, 'log'):
+					self.log.appendPlainText("\n[Interrupt] Ctrl+C sent to stop command")
+					self.log.moveCursor(QtGui.QTextCursor.End)
+		except Exception as e:
+			print(f"[DEBUG] Error sending interrupt signal: {e}")
+			if hasattr(self, 'log'):
+				self.log.appendPlainText(f"\n[Error] Failed to send interrupt: {e}")
 
 	def find_linux_port(self, soc_port_id: Optional[str] = None) -> Optional[str]:
 		try:
@@ -807,6 +838,7 @@ class CommConsole(QtWidgets.QWidget):
 				pass
 			QtWidgets.QMessageBox.warning(self, "Serial Disconnected", f"Serial port error: {str(e)}\nThe connection has been closed.")
 			self.uart_connect_btn.setChecked(False)
+			self.uart_stop_btn.setEnabled(False)  # Disable Stop button on error/disconnect
 
 	def _on_send(self) -> None:
 		msg = (self.input.toPlainText().rstrip("\r\n").split("\n")[-1] if hasattr(self, 'input') else "")
@@ -867,12 +899,21 @@ class CommConsole(QtWidgets.QWidget):
 	def eventFilter(self, source, event):  # type: ignore[override]
 		try:
 			if hasattr(self, 'input') and source is self.input and isinstance(event, QtGui.QKeyEvent):
-				if event.type() == QtCore.QEvent.KeyPress and event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
-					if event.modifiers() & QtCore.Qt.ShiftModifier:
-						self.input.insertPlainText("\n")
-					else:
-						self._on_send()
-						return True
+				if event.type() == QtCore.QEvent.KeyPress:
+					# Handle Ctrl+C to interrupt running command
+					if event.key() == QtCore.Qt.Key_C and event.modifiers() & QtCore.Qt.ControlModifier:
+						# Only send interrupt if UART protocol is selected and connected
+						idx = self.proto_combo.currentIndex() if hasattr(self, 'proto_combo') else -1
+						if idx == 0 and self._serial is not None:
+							self._on_uart_stop()
+							return True
+					# Handle Enter/Return to send command
+					elif event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+						if event.modifiers() & QtCore.Qt.ShiftModifier:
+							self.input.insertPlainText("\n")
+						else:
+							self._on_send()
+							return True
 		except KeyboardInterrupt:
 			return False
 		except Exception:
