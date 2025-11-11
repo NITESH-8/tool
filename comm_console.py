@@ -34,6 +34,7 @@ from __future__ import annotations
 from typing import Optional, List, Callable
 import os
 import platform
+import re
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -784,6 +785,63 @@ class CommConsole(QtWidgets.QWidget):
 			print(f"[DEBUG] Error in _on_port_changed: {e}")
 			pass
 
+	def _strip_ansi_codes(self, text: str) -> str:
+		"""Remove ANSI escape sequences from text.
+		
+		This function removes ANSI escape codes that are used for terminal
+		formatting (colors, cursor positioning, etc.) so they don't appear
+		as visible characters in the UART console.
+		
+		Handles both standard ANSI codes (with ESC character) and corrupted
+		sequences where the ESC character may be missing during UART transmission.
+		"""
+		# First, remove standard ANSI escape sequences with ESC character
+		ansi_pattern = re.compile(
+			# Standard CSI sequences: ESC[ followed by optional parameters and command
+			r'\x1b\[[0-9;]*[a-zA-Z]'
+			# SGR sequences (colors/formatting): ESC[ ... m
+			r'|\x1b\[[0-9;]*m'
+			# Erase sequences: ESC[ ... J or ESC[ ... K
+			r'|\x1b\[[0-9]*[JK]'
+			# Cursor movement: ESC[ ... A-H
+			r'|\x1b\[[0-9]*[ABCDEFGH]'
+			# Cursor position: ESC[ ... H or ESC[ ... f
+			r'|\x1b\[[0-9;]*[Hf]'
+			# Mode sequences: ESC[ ... h or ESC[ ... l
+			r'|\x1b\[[?0-9]*[hl]'
+			# Scroll region: ESC[ ... r
+			r'|\x1b\[[0-9]*[r]'
+			# OSC sequences: ESC] ... BEL
+			r'|\x1b\][^\x07]*\x07'
+			# ESC followed by single char commands (without [)
+			r'|\x1b[=<>?\(\)]'
+		)
+		cleaned = ansi_pattern.sub('', text)
+		
+		# Second pass: Remove corrupted/malformed sequences where ESC is missing
+		# These patterns match common ANSI code formats that appear without ESC
+		# Be more specific to avoid false matches with legitimate text
+		corrupted_pattern = re.compile(
+			# Color/formatting codes: [number;numberm or [numberm
+			r'\[[0-9]+(;[0-9]+)*m'
+			# Erase commands: [numberK or [K or [numberJ or [J
+			r'|\[[0-9]*[JK]'
+			# Cursor position: [number;numberH or [H or [number;numberf or [f
+			r'|\[[0-9]*(;[0-9]+)*[Hf]'
+			# Mode sequences: [?numberh or [?numberl or [numberh or [numberl
+			r'|\[[?]?[0-9]*[hl]'
+			# Cursor movement: [numberA through [numberH
+			r'|\[[0-9]*[ABCDEFGH]'
+			# Scroll region: [number;numberr or [numberr
+			r'|\[[0-9]*(;[0-9]+)*r'
+			# Common corrupted patterns seen in UART output
+			r'|\[m[0-9]+'  # [m followed by numbers (corrupted reset + code)
+			r'|\[[0-9]+\['  # [number[ (nested/corrupted)
+		)
+		cleaned = corrupted_pattern.sub('', cleaned)
+		
+		return cleaned
+
 	def _reset_uart_controls(self, clear_ports: bool) -> None:
 		if clear_ports:
 			self.uart_port_combo.clear()
@@ -822,11 +880,14 @@ class CommConsole(QtWidgets.QWidget):
 				
 				# Update UI with all collected text at once (more efficient)
 				if total_text:
+					# Strip ANSI escape codes before displaying
+					cleaned_text = self._strip_ansi_codes(total_text)
 					port = self.uart_port_combo.currentText()
-					self._port_logs[port] = self._port_logs.get(port, "") + total_text
+					# Store cleaned text in port logs
+					self._port_logs[port] = self._port_logs.get(port, "") + cleaned_text
 					if hasattr(self, 'log'):
 						self.log.moveCursor(QtGui.QTextCursor.End)
-						self.log.insertPlainText(total_text)
+						self.log.insertPlainText(cleaned_text)
 						self.log.moveCursor(QtGui.QTextCursor.End)
 		except Exception as e:
 			self._poll.stop()
