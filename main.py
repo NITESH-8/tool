@@ -874,6 +874,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		# Actions
 		a_start = QtGui.QAction("Execute Test", self)
 		a_start.triggered.connect(self._on_start)
+		a_show_log = QtGui.QAction("Show Log", self)
+		a_show_log.triggered.connect(self._open_log_dialog)
 		a_stop = QtGui.QAction("Stop", self)
 		a_stop.triggered.connect(self._on_stop)
 		a_clear = QtGui.QAction("Clear Data", self)
@@ -885,7 +887,8 @@ class PerformanceApp(QtWidgets.QMainWindow):
 		a_sched = QtGui.QAction("Schedule Load", self)
 		a_sched.triggered.connect(self._on_schedule_load)
 		# Collapse/expand handled by side handle; Reset View exists in plot header
-		for act in [a_start, a_stop, a_clear, a_sched, a_csv, a_png]:
+		# Show Log button is placed between Execute Test and Stop for easy access
+		for act in [a_start, a_show_log, a_stop, a_clear, a_sched, a_csv, a_png]:
 			toolbar.addAction(act)
 		# Tag important toolbar buttons for themed styling
 		# Keep references so we can enable/disable the visible toolbar buttons
