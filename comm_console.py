@@ -842,6 +842,60 @@ class CommConsole(QtWidgets.QWidget):
 		
 		return cleaned
 
+	def _clean_uart_text(self, text: str) -> str:
+		"""Clean UART text by removing ANSI codes, non-printable characters, and invalid UTF-8 replacements.
+		
+		This function:
+		1. Removes ANSI escape sequences
+		2. Removes Unicode replacement characters (U+FFFD - question marks in boxes)
+		3. Filters out non-printable control characters (except common ones like \n, \r, \t)
+		4. Removes other problematic characters
+		"""
+		# First strip ANSI codes
+		cleaned = self._strip_ansi_codes(text)
+		
+		# Remove Unicode replacement character (U+FFFD) - appears as or ? in boxes
+		cleaned = cleaned.replace('\ufffd', '')
+		cleaned = cleaned.replace('\uFFFD', '')
+		
+		# Remove other common problematic Unicode characters
+		# Zero-width characters
+		cleaned = cleaned.replace('\u200b', '')  # Zero-width space
+		cleaned = cleaned.replace('\u200c', '')  # Zero-width non-joiner
+		cleaned = cleaned.replace('\u200d', '')  # Zero-width joiner
+		cleaned = cleaned.replace('\ufeff', '')  # Zero-width no-break space
+		
+		# Filter out non-printable control characters except common ones
+		# Keep: \n (newline), \r (carriage return), \t (tab)
+		result = []
+		for char in cleaned:
+			code = ord(char)
+			# Skip Unicode replacement character (U+FFFD = 65533) - question mark in box
+			if code == 0xFFFD:
+				continue
+			
+			# Keep common control characters
+			if code == 10 or code == 13 or code == 9:  # \n, \r, \t
+				result.append(char)
+			# Keep printable ASCII (32-126)
+			elif code >= 32 and code <= 126:
+				result.append(char)
+			# Keep extended ASCII (128-255) - may include accented characters
+			elif code >= 128 and code <= 255:
+				result.append(char)
+			# For Unicode characters above 255
+			elif code > 255:
+				# Skip private use area and other non-printable ranges
+				if code >= 0xE000 and code <= 0xF8FF:  # Private Use Area
+					continue
+				elif code >= 0xF900 and code <= 0xFAFF:  # CJK Compatibility Ideographs (may cause issues)
+					continue
+				# Keep printable Unicode characters
+				if char.isprintable() or char.isspace():
+					result.append(char)
+		
+		return ''.join(result)
+
 	def _reset_uart_controls(self, clear_ports: bool) -> None:
 		if clear_ports:
 			self.uart_port_combo.clear()
@@ -866,11 +920,22 @@ class CommConsole(QtWidgets.QWidget):
 					data = self._serial.read(bytes_to_read)
 					if data:
 						try:
-							text = data.decode(errors="replace")
+							# Try UTF-8 first, then fallback to latin-1 (which can decode any byte)
+							# This avoids replacement characters from invalid UTF-8
+							try:
+								text = data.decode('utf-8', errors='ignore')
+							except Exception:
+								# If UTF-8 fails completely, try latin-1 (maps bytes 0-255 directly)
+								text = data.decode('latin-1', errors='ignore')
 							total_text += text
 						except Exception:
-							text = str(data)
-							total_text += text
+							# Last resort: decode as latin-1 which always works
+							try:
+								text = data.decode('latin-1', errors='ignore')
+								total_text += text
+							except Exception:
+								# If all else fails, skip this data
+								pass
 					read_count += 1
 					
 					# Small delay to allow more data to arrive if streaming
@@ -880,8 +945,8 @@ class CommConsole(QtWidgets.QWidget):
 				
 				# Update UI with all collected text at once (more efficient)
 				if total_text:
-					# Strip ANSI escape codes before displaying
-					cleaned_text = self._strip_ansi_codes(total_text)
+					# Clean text: remove ANSI codes, non-printable chars, and invalid UTF-8 replacements
+					cleaned_text = self._clean_uart_text(total_text)
 					port = self.uart_port_combo.currentText()
 					# Store cleaned text in port logs
 					self._port_logs[port] = self._port_logs.get(port, "") + cleaned_text
