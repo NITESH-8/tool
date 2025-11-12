@@ -3010,7 +3010,7 @@ class PerformanceApp(QtWidgets.QMainWindow):
 			hasattr(self, 'cpu_target_checkbox') and 
 			self.cpu_target_checkbox.isChecked()):
 			target = self.states[Subsystem.CPU].target_percent
-			parts.extend(["--cpu-core", "all", "--cpu-load", str(target)])
+			parts.extend(["--cpu-cores", "all", "--cpu-load", str(target)])
 		else:
 			# CPU cores - only if individual cores are checked (and CPU Target is not checked)
 			for core_id in self.active_cores:
