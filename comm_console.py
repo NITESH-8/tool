@@ -967,9 +967,18 @@ class CommConsole(QtWidgets.QWidget):
 			self.uart_stop_btn.setEnabled(False)  # Disable Stop button on error/disconnect
 
 	def _on_send(self) -> None:
-		msg = (self.input.toPlainText().rstrip("\r\n").split("\n")[-1] if hasattr(self, 'input') else "")
-		if not msg:
+		# Get all lines from input (support multiple commands like TeraTerm)
+		input_text = self.input.toPlainText() if hasattr(self, 'input') else ""
+		if not input_text:
 			return
+		
+		# Split into lines and filter out empty lines
+		lines = [line.strip() for line in input_text.split("\n") if line.strip()]
+		if not lines:
+			if hasattr(self, 'input'):
+				self.input.clear()
+			return
+		
 		try:
 			idx = self.proto_combo.currentIndex() if hasattr(self, 'proto_combo') else 0
 			# Only handle UART and ADB here; CMD terminals have their own handler
@@ -979,45 +988,60 @@ class CommConsole(QtWidgets.QWidget):
 				return
 			serial_obj = getattr(self, '_serial', None)
 			if idx == 0 and serial_obj is not None:
-				serial_obj.write((msg + "\n").encode())
-				port = self.uart_port_combo.currentText()
-				self._port_logs[port] = self._port_logs.get(port, "") + msg + "\n"
-				if hasattr(self, 'log'):
-					self.log.moveCursor(QtGui.QTextCursor.End)
-					self.log.insertPlainText("\n")
-					self.log.moveCursor(QtGui.QTextCursor.End)
+				# Send multiple commands sequentially with proper timing (like TeraTerm)
+				if len(lines) > 1:
+					# Multiple commands: send them one by one with delay
+					self._send_multiple_uart_commands(lines)
+				else:
+					# Single command: send immediately
+					msg = lines[0]
+					serial_obj.write((msg + "\n").encode())
+					port = self.uart_port_combo.currentText()
+					self._port_logs[port] = self._port_logs.get(port, "") + msg + "\n"
+					if hasattr(self, 'log'):
+						self.log.moveCursor(QtGui.QTextCursor.End)
+						self.log.insertPlainText(msg + "\n")
+						self.log.moveCursor(QtGui.QTextCursor.End)
 				if hasattr(self, 'input'):
 					self.input.clear()
 			elif idx == 2 and self._adb_connected:
-				# Send command to interactive ADB shell using utility function
-				if self._adb_shell_process and is_shell_running(self._adb_shell_process):
-					print(f"[DEBUG] Sending command to ADB shell: {msg}")
-					# Echo the command to the terminal (like a real terminal does)
-					if hasattr(self, 'log'):
-						self.log.appendPlainText(f"$ {msg}")
-					
-					# Send the command using utility function
-					success, message = send_shell_command(self._adb_shell_process, msg)
-					if success:
-						print(f"[DEBUG] Command sent successfully: {message}")
+				# For ADB, send commands one by one (handle multiple commands)
+				for msg in lines:
+					# Send command to interactive ADB shell using utility function
+					if self._adb_shell_process and is_shell_running(self._adb_shell_process):
+						print(f"[DEBUG] Sending command to ADB shell: {msg}")
+						# Echo the command to the terminal (like a real terminal does)
+						if hasattr(self, 'log'):
+							self.log.appendPlainText(f"$ {msg}")
+						
+						# Send the command using utility function
+						success, message = send_shell_command(self._adb_shell_process, msg)
+						if success:
+							print(f"[DEBUG] Command sent successfully: {message}")
+						else:
+							print(f"[DEBUG] Failed to send command: {message}")
+						
+						# Small delay between commands for ADB
+						if len(lines) > 1:
+							import time
+							time.sleep(0.2)
 					else:
-						print(f"[DEBUG] Failed to send command: {message}")
-					
-					if hasattr(self, 'input'):
-						self.input.clear()
-				else:
-					print("[DEBUG] ADB shell process not running, falling back to single command")
-					# Fallback to single command execution
-					serial = self._adb_serial
-					code, out, err = adb_shell(serial, msg)
-					if hasattr(self, 'log'):
-						self.log.moveCursor(QtGui.QTextCursor.End)
-						self.log.insertPlainText((out + ("\n" if out else "")) or "")
-						if err:
-							self.log.insertPlainText((err + "\n"))
-						self.log.moveCursor(QtGui.QTextCursor.End)
-					if hasattr(self, 'input'):
-						self.input.clear()
+						print("[DEBUG] ADB shell process not running, falling back to single command")
+						# Fallback to single command execution
+						serial = self._adb_serial
+						code, out, err = adb_shell(serial, msg)
+						if hasattr(self, 'log'):
+							self.log.moveCursor(QtGui.QTextCursor.End)
+							self.log.insertPlainText((out + ("\n" if out else "")) or "")
+							if err:
+								self.log.insertPlainText((err + "\n"))
+							self.log.moveCursor(QtGui.QTextCursor.End)
+						# Small delay between commands for ADB
+						if len(lines) > 1:
+							import time
+							time.sleep(0.2)
+				if hasattr(self, 'input'):
+					self.input.clear()
 		except Exception:
 			# Suppress errors from stray focus or non-UART contexts
 			pass
@@ -1053,6 +1077,45 @@ class CommConsole(QtWidgets.QWidget):
 				self._serial.write((line + "\n").encode())
 		except Exception:
 			pass
+
+	def _send_multiple_uart_commands(self, commands: List[str], spacing_ms: int = 200) -> None:
+		"""Send multiple UART commands sequentially with proper timing and UI echo.
+		
+		This method sends commands one by one with a delay between them, similar to
+		how TeraTerm handles pasted multiple commands. Each command is echoed to the UI.
+		
+		Args:
+			commands: List of command strings to send
+			spacing_ms: Delay in milliseconds between commands (default 200ms)
+		"""
+		if not commands:
+			return
+		
+		queue = list(commands)
+		timer = QtCore.QTimer(self)
+		timer.setInterval(max(50, int(spacing_ms)))
+		port = self.uart_port_combo.currentText()
+		
+		def _send_next():
+			if not queue:
+				timer.stop()
+				return
+			cmd = queue.pop(0)
+			try:
+				if self._serial is not None:
+					self._serial.write((cmd + "\n").encode())
+					# Echo command to UI
+					self._port_logs[port] = self._port_logs.get(port, "") + cmd + "\n"
+					if hasattr(self, 'log'):
+						self.log.moveCursor(QtGui.QTextCursor.End)
+						self.log.insertPlainText(cmd + "\n")
+						self.log.moveCursor(QtGui.QTextCursor.End)
+			except Exception as e:
+				print(f"[DEBUG] Error sending command '{cmd}': {e}")
+		
+		timer.timeout.connect(_send_next)
+		timer.start()
+		_send_next()  # Send first command immediately
 
 	def send_commands_silent(self, commands: List[str], spacing_ms: int = 300, on_complete: Optional[Callable[[], None]] = None) -> None:
 		"""Send commands over UART without echoing them into the console UI."""
