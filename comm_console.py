@@ -456,9 +456,10 @@ class CommConsole(QtWidgets.QWidget):
 						info_parts.append(root_status)
 						self.log.appendPlainText(f"[ADB] Device Info: {', '.join(info_parts)}")
 				
-				# Wait for initial prompt
+				# Wait for initial prompt with more aggressive reading
 				print("[DEBUG] Waiting for initial ADB shell prompt...")
-				for attempt in range(5):
+				import time
+				for attempt in range(10):  # Try more times
 					success, stdout, stderr = read_shell_output(self._adb_shell_process)
 					if success and (stdout or stderr):
 						print(f"[DEBUG] Data received on attempt {attempt + 1}: stdout={repr(stdout)}, stderr={repr(stderr)}")
@@ -467,8 +468,16 @@ class CommConsole(QtWidgets.QWidget):
 						print(f"[DEBUG] No data ready on attempt {attempt + 1}")
 					
 					# Small delay between attempts
-					import time
-					time.sleep(0.2)
+					time.sleep(0.1)  # Shorter delay for faster response
+					
+					# Force repaint to show any output
+					if hasattr(self, 'log'):
+						self.log.repaint()
+				
+				# Additional delayed reads to catch prompt that might come later
+				QtCore.QTimer.singleShot(200, self._on_adb_shell_output)
+				QtCore.QTimer.singleShot(500, self._on_adb_shell_output)
+				QtCore.QTimer.singleShot(1000, self._on_adb_shell_output)
 				
 				print("[DEBUG] Finished waiting for initial ADB shell prompt")
 				
