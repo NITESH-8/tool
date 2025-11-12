@@ -223,55 +223,56 @@ class TerminalWidget(QtWidgets.QWidget):
 			if self._subproc.state() != QtCore.QProcess.Running:
 				return
 			
-			# Read from both stdout and stderr separately to catch all output
-			stdout_data = self._subproc.readAllStandardOutput().data()
-			stderr_data = self._subproc.readAllStandardError().data()
+			# Read all available data in a loop to catch everything
+			total_text = ""
+			max_reads = 10  # Prevent infinite loop
+			read_count = 0
 			
-			# Process stdout
-			if stdout_data:
-				try:
-					text = stdout_data.decode(errors='replace')
-					print(f"[DEBUG] ADB stdout received: {repr(text)}")
-					
-					# Check if this looks like an Android shell prompt
-					if self._detect_android_prompt(text):
-						print(f"[DEBUG] Android prompt detected in stdout: {repr(text)}")
-					
-					# Display the text immediately
-					self.view.moveCursor(QtGui.QTextCursor.End)
-					self.view.insertPlainText(text)
-					self.view.moveCursor(QtGui.QTextCursor.End)
-					self.view.repaint()
-				except Exception as e:
-					print(f"[DEBUG] Error decoding stdout: {e}")
-					text = str(stdout_data)
-					self.view.moveCursor(QtGui.QTextCursor.End)
-					self.view.insertPlainText(text)
-					self.view.moveCursor(QtGui.QTextCursor.End)
-					self.view.repaint()
+			while read_count < max_reads:
+				# Read from both stdout and stderr separately to catch all output
+				stdout_data = self._subproc.readAllStandardOutput().data()
+				stderr_data = self._subproc.readAllStandardError().data()
+				
+				# Process stdout
+				if stdout_data:
+					try:
+						text = stdout_data.decode(errors='replace')
+						total_text += text
+						print(f"[DEBUG] ADB stdout received: {repr(text)}")
+						
+						# Check if this looks like an Android shell prompt
+						if self._detect_android_prompt(text):
+							print(f"[DEBUG] Android prompt detected in stdout: {repr(text)}")
+					except Exception as e:
+						print(f"[DEBUG] Error decoding stdout: {e}")
+						total_text += str(stdout_data)
+				
+				# Process stderr
+				if stderr_data:
+					try:
+						text = stderr_data.decode(errors='replace')
+						total_text += text
+						print(f"[DEBUG] ADB stderr received: {repr(text)}")
+						
+						# Check if this looks like an Android shell prompt
+						if self._detect_android_prompt(text):
+							print(f"[DEBUG] Android prompt detected in stderr: {repr(text)}")
+					except Exception as e:
+						print(f"[DEBUG] Error decoding stderr: {e}")
+						total_text += str(stderr_data)
+				
+				# If no more data available, break
+				if not stdout_data and not stderr_data:
+					break
+				
+				read_count += 1
 			
-			# Process stderr
-			if stderr_data:
-				try:
-					text = stderr_data.decode(errors='replace')
-					print(f"[DEBUG] ADB stderr received: {repr(text)}")
-					
-					# Check if this looks like an Android shell prompt
-					if self._detect_android_prompt(text):
-						print(f"[DEBUG] Android prompt detected in stderr: {repr(text)}")
-					
-					# Display the text immediately
-					self.view.moveCursor(QtGui.QTextCursor.End)
-					self.view.insertPlainText(text)
-					self.view.moveCursor(QtGui.QTextCursor.End)
-					self.view.repaint()
-				except Exception as e:
-					print(f"[DEBUG] Error decoding stderr: {e}")
-					text = str(stderr_data)
-					self.view.moveCursor(QtGui.QTextCursor.End)
-					self.view.insertPlainText(text)
-					self.view.moveCursor(QtGui.QTextCursor.End)
-					self.view.repaint()
+			# Display all collected text at once
+			if total_text:
+				self.view.moveCursor(QtGui.QTextCursor.End)
+				self.view.insertPlainText(total_text)
+				self.view.moveCursor(QtGui.QTextCursor.End)
+				self.view.repaint()
 					
 		except Exception as e:
 			print(f"[DEBUG] Error in _on_sub_out: {e}")
@@ -474,7 +475,8 @@ class TerminalWidget(QtWidgets.QWidget):
 			if parts and parts[0].lower() == "adb" and parts[-1].lower() == "shell":
 				print(f"[DEBUG] Starting ADB shell with args: {parts[1:]}")
 				self._subproc = QtCore.QProcess(self)
-				self._subproc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+				# Use SeparateChannels to read stdout and stderr separately for better prompt detection
+				self._subproc.setProcessChannelMode(QtCore.QProcess.SeparateChannels)
 				self._subproc.readyReadStandardOutput.connect(self._on_sub_out)
 				self._subproc.readyReadStandardError.connect(self._on_sub_out)
 				self._subproc.finished.connect(lambda _c, _s: self._end_subsession())
@@ -502,23 +504,33 @@ class TerminalWidget(QtWidgets.QWidget):
 				print("[DEBUG] Waiting for initial ADB shell output...")
 				
 				# Try multiple approaches to get the initial prompt
-				for attempt in range(5):  # Try 5 times
+				# Use a more aggressive approach with delays to allow ADB shell to initialize
+				import time
+				for attempt in range(10):  # Try 10 times with shorter waits
 					print(f"[DEBUG] Attempt {attempt + 1} to read initial output...")
 					
+					# Small delay to allow ADB shell to start and produce output
+					time.sleep(0.1)
+					
 					# Wait for data to be available
-					if self._subproc.waitForReadyRead(1000):  # Wait 1 second each time
+					if self._subproc.waitForReadyRead(500):  # Wait 500ms each time
 						print(f"[DEBUG] Data ready, bytes available: {self._subproc.bytesAvailable()}")
 						self._on_sub_out()
-					else:
-						print(f"[DEBUG] No data ready on attempt {attempt + 1}")
 					
-					# Also try reading immediately without waiting
+					# Always try reading immediately (output might be buffered)
 					self._on_sub_out()
 					
+					# Force a repaint to show any output
+					self.view.repaint()
+					
 					# Check if we got any output
-					if self._subproc.bytesAvailable() == 0:
-						print(f"[DEBUG] No more data available after attempt {attempt + 1}")
-						break
+					if self._subproc.bytesAvailable() == 0 and attempt >= 3:
+						# After a few attempts, if no data, continue anyway (prompt might come later)
+						print(f"[DEBUG] No more data available after attempt {attempt + 1}, continuing...")
+				
+				# One final read attempt after a short delay
+				QtCore.QTimer.singleShot(200, self._on_sub_out)
+				QtCore.QTimer.singleShot(500, self._on_sub_out)
 				
 				print("[DEBUG] Finished initial output reading attempts")
 				self.input.clear()
