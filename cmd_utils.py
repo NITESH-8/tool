@@ -80,21 +80,31 @@ class TerminalWidget(QtWidgets.QWidget):
 		# Create the input area
 		self.input = QtWidgets.QLineEdit()
 		self.input.returnPressed.connect(self._send)
+		# Install event filter to intercept Ctrl+C in input field
+		self.input.installEventFilter(self)
 		v.addWidget(self.input)
 		
-		# Control row: Run and Clear buttons as a safety path if Enter filter fails
+		# Control row: Run, Stop, and Clear buttons
 		ctrl = QtWidgets.QHBoxLayout()
 		btn_run = QtWidgets.QPushButton("Run")
 		btn_run.clicked.connect(self._send)
 		ctrl.addWidget(btn_run)
+		btn_stop = QtWidgets.QPushButton("Stop")
+		btn_stop.setToolTip("Stop/terminate running process or command (Ctrl+C)")
+		btn_stop.clicked.connect(self._stop_process)
+		ctrl.addWidget(btn_stop)
 		btn_clear = QtWidgets.QPushButton("Clear")
 		btn_clear.clicked.connect(lambda: (self.view.clear(), self._print_prompt()))
 		ctrl.addWidget(btn_clear)
 		ctrl.addStretch(1)
 		v.addLayout(ctrl)
 		
-		# Shortcut: Ctrl+Enter to run
+		# Shortcuts
 		QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Return"), self, activated=self._send)
+		# Ctrl+C to stop/terminate process - also install on view to catch it there
+		QtGui.QShortcut(QtGui.QKeySequence("Ctrl+C"), self, activated=self._stop_process)
+		# Also install event filter on view to catch Ctrl+C
+		self.view.installEventFilter(self)
 		
 		# Initialize process and platform detection
 		self.proc = None
@@ -169,12 +179,31 @@ class TerminalWidget(QtWidgets.QWidget):
 			data = self.proc.readAllStandardOutput().data()
 			if data:
 				try:
-					text = data.decode(errors='replace')
+					# First, filter out the Ctrl+C character (\x03) from raw bytes before decoding
+					# This prevents it from being decoded and displayed
+					filtered_data = bytes(b for b in data if b != 0x03)
+					if not filtered_data:
+						return  # If only Ctrl+C was in the data, skip it
+					
+					text = filtered_data.decode(errors='replace')
+					# Additional filtering: remove any control characters except newline, carriage return, tab
+					# This catches any that might have slipped through
+					filtered_text = ''.join(char for char in text if ord(char) >= 32 or char in '\n\r\t')
+					text = filtered_text
 				except Exception:
-					text = str(data)
-				self.view.moveCursor(QtGui.QTextCursor.End)
-				self.view.insertPlainText(text)
-				self.view.moveCursor(QtGui.QTextCursor.End)
+					# If decoding fails, filter bytes directly
+					filtered_data = bytes(b for b in data if b != 0x03 and (b >= 32 or b in (10, 13, 9)))
+					if not filtered_data:
+						return
+					text = filtered_data.decode(errors='ignore')
+					# Also filter control chars from string representation
+					text = ''.join(char for char in text if ord(char) >= 32 or char in '\n\r\t')
+				
+				# Only display if there's actual content (not just control chars)
+				if text.strip() or text.endswith('\n') or text.endswith('\r\n'):
+					self.view.moveCursor(QtGui.QTextCursor.End)
+					self.view.insertPlainText(text)
+					self.view.moveCursor(QtGui.QTextCursor.End)
 		except Exception:
 			pass
 
@@ -277,6 +306,79 @@ class TerminalWidget(QtWidgets.QWidget):
 			print(f"[DEBUG] Error in _check_adb_output: {e}")
 			pass
 
+	def _stop_process(self) -> None:
+		"""
+		Stop/terminate running processes in the terminal.
+		
+		This method stops both ADB shell subprocesses and the main shell process
+		if they are running. It provides a way for users to interrupt long-running
+		commands or terminate the terminal session.
+		"""
+		try:
+			# First, try to stop ADB shell subprocess if active
+			if self._in_subsession and self._subproc is not None:
+				try:
+					if self._subproc.state() == QtCore.QProcess.Running:
+						# Try to send Ctrl+C (interrupt) to the ADB shell
+						try:
+							self._subproc.write(b'\x03')  # Ctrl+C
+							self._subproc.write(b'\n')
+							self._subproc.waitForBytesWritten(100)
+						except Exception:
+							pass
+						
+						# Wait a moment for graceful termination
+						if not self._subproc.waitForFinished(500):
+							# Force terminate if it doesn't stop gracefully
+							self._subproc.terminate()
+							if not self._subproc.waitForFinished(1000):
+								self._subproc.kill()
+								self._subproc.waitForFinished(1000)
+						
+						self.view.appendPlainText("\n[Process terminated]\n")
+						self._end_subsession()
+						return
+				except Exception as e:
+					print(f"[DEBUG] Error stopping ADB subprocess: {e}")
+					self._end_subsession()
+			
+			# If no ADB subprocess, try to send Ctrl+C to main shell
+			if self.proc is not None and self.proc.state() == QtCore.QProcess.Running:
+				try:
+					# Send Ctrl+C to interrupt current command
+					# On Windows, Ctrl+C is sent as \x03, on Unix it's also \x03
+					self.proc.write(b'\x03')  # Ctrl+C
+					self.proc.waitForBytesWritten(100)
+					
+					# Wait a moment for the interrupt to be processed, then send newline to get prompt back
+					# This ensures the shell returns to ready state and shows the prompt
+					QtCore.QTimer.singleShot(100, lambda: self._restore_prompt_after_interrupt())
+					
+					self.view.appendPlainText("\n[Interrupt sent - Ctrl+C]\n")
+				except Exception as e:
+					print(f"[DEBUG] Error sending interrupt to main shell: {e}")
+					self.view.appendPlainText("\n[Error: Could not send interrupt]\n")
+		except Exception as e:
+			print(f"[DEBUG] Error in _stop_process: {e}")
+			self.view.appendPlainText(f"\n[Error: {e}]\n")
+
+	def _restore_prompt_after_interrupt(self) -> None:
+		"""
+		Restore the shell prompt after sending Ctrl+C interrupt.
+		
+		This method sends a newline to the shell to trigger it to return to
+		the prompt state, ensuring the user can continue entering commands.
+		"""
+		try:
+			if self.proc is not None and self.proc.state() == QtCore.QProcess.Running:
+				# Send a newline to get the prompt back
+				# On Windows cmd.exe, after Ctrl+C, pressing Enter returns to prompt
+				newline = "\r\n" if self._is_windows else "\n"
+				self.proc.write(newline.encode())
+				self.proc.waitForBytesWritten(100)
+		except Exception as e:
+			print(f"[DEBUG] Error restoring prompt: {e}")
+
 	def _end_subsession(self) -> None:
 		"""
 		Clean up ADB shell subprocess and reset session state.
@@ -287,6 +389,12 @@ class TerminalWidget(QtWidgets.QWidget):
 		"""
 		try:
 			if self._subproc is not None:
+				# Terminate the process if still running
+				if self._subproc.state() == QtCore.QProcess.Running:
+					self._subproc.terminate()
+					if not self._subproc.waitForFinished(1000):
+						self._subproc.kill()
+						self._subproc.waitForFinished(1000)
 				self._subproc.deleteLater()
 			self._subproc = None
 			self._in_subsession = False
@@ -340,7 +448,15 @@ class TerminalWidget(QtWidgets.QWidget):
 		if not msg:
 			return
 		try:
-			line = msg.strip()
+			# Filter out control characters (like Ctrl+C \x03) that might have gotten into the input
+			# Remove any non-printable control characters except newline, tab, carriage return
+			filtered_msg = ''.join(char for char in msg if ord(char) >= 32 or char in '\n\r\t')
+			line = filtered_msg.strip()
+			
+			# If after filtering the line is empty or only contains control chars, don't send
+			if not line:
+				self.input.clear()
+				return
 			
 			# If we're in an interactive adb shell subsession, route input there
 			if self._in_subsession and self._subproc is not None:
@@ -486,6 +602,33 @@ class TerminalWidget(QtWidgets.QWidget):
 				self.view.moveCursor(QtGui.QTextCursor.End)
 		except Exception:
 			pass
+
+	def eventFilter(self, source, event):  # type: ignore[override]
+		"""
+		Event filter to intercept Ctrl+C and prevent it from being sent as text.
+		
+		This ensures that Ctrl+C always triggers the stop function instead of
+		being interpreted as a command to send to the shell.
+		"""
+		try:
+			if isinstance(event, QtGui.QKeyEvent):
+				if event.type() == QtCore.QEvent.KeyPress:
+					# Handle Ctrl+C to stop process
+					if event.key() == QtCore.Qt.Key_C and event.modifiers() & QtCore.Qt.ControlModifier:
+						# Clear input field to prevent any control characters from being sent
+						if source == self.input:
+							self.input.clear()
+						# Intercept Ctrl+C and trigger stop instead
+						# Use QTimer to ensure this happens after any pending input processing
+						QtCore.QTimer.singleShot(0, self._stop_process)
+						return True  # Event handled, don't propagate
+					# Also block any other control characters that might cause issues
+					if event.key() < 32 and event.key() not in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter, QtCore.Qt.Key_Tab):
+						# Block control characters except Enter and Tab
+						return True
+		except Exception:
+			pass
+		return super().eventFilter(source, event)
 
 	def _print_host_prompt(self) -> None:
 		"""
