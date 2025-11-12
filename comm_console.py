@@ -738,12 +738,7 @@ class CommConsole(QtWidgets.QWidget):
 			try:
 				if self._serial is not None:
 					self._serial.write((cmd + "\n").encode())
-					port = self.uart_port_combo.currentText()
-					self._port_logs[port] = self._port_logs.get(port, "") + cmd + "\n"
-					if hasattr(self, 'log'):
-						self.log.moveCursor(QtGui.QTextCursor.End)
-						self.log.insertPlainText(cmd + "\n")
-						self.log.moveCursor(QtGui.QTextCursor.End)
+					# Don't echo command - only show device response
 			except Exception:
 				pass
 		timer.timeout.connect(_flush_next)
@@ -1002,15 +997,10 @@ class CommConsole(QtWidgets.QWidget):
 					# Multiple commands: send them one by one with delay
 					self._send_multiple_uart_commands(lines)
 				else:
-					# Single command: send immediately
+					# Single command: send immediately without echoing
 					msg = lines[0]
 					serial_obj.write((msg + "\n").encode())
-					port = self.uart_port_combo.currentText()
-					self._port_logs[port] = self._port_logs.get(port, "") + msg + "\n"
-					if hasattr(self, 'log'):
-						self.log.moveCursor(QtGui.QTextCursor.End)
-						self.log.insertPlainText(msg + "\n")
-						self.log.moveCursor(QtGui.QTextCursor.End)
+					# Don't echo the command - only show device response
 				if hasattr(self, 'input'):
 					self.input.clear()
 			elif idx == 2 and self._adb_connected:
@@ -1088,10 +1078,10 @@ class CommConsole(QtWidgets.QWidget):
 			pass
 
 	def _send_multiple_uart_commands(self, commands: List[str], spacing_ms: int = 200) -> None:
-		"""Send multiple UART commands sequentially with proper timing and UI echo.
+		"""Send multiple UART commands sequentially with proper timing.
 		
 		This method sends commands one by one with a delay between them, similar to
-		how TeraTerm handles pasted multiple commands. Each command is echoed to the UI.
+		how TeraTerm handles pasted multiple commands. Commands are NOT echoed to the UI.
 		
 		Args:
 			commands: List of command strings to send
@@ -1103,7 +1093,6 @@ class CommConsole(QtWidgets.QWidget):
 		queue = list(commands)
 		timer = QtCore.QTimer(self)
 		timer.setInterval(max(50, int(spacing_ms)))
-		port = self.uart_port_combo.currentText()
 		
 		def _send_next():
 			if not queue:
@@ -1113,12 +1102,7 @@ class CommConsole(QtWidgets.QWidget):
 			try:
 				if self._serial is not None:
 					self._serial.write((cmd + "\n").encode())
-					# Echo command to UI
-					self._port_logs[port] = self._port_logs.get(port, "") + cmd + "\n"
-					if hasattr(self, 'log'):
-						self.log.moveCursor(QtGui.QTextCursor.End)
-						self.log.insertPlainText(cmd + "\n")
-						self.log.moveCursor(QtGui.QTextCursor.End)
+					# Don't echo command - only show device response
 			except Exception as e:
 				print(f"[DEBUG] Error sending command '{cmd}': {e}")
 		
